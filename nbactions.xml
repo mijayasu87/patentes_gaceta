@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<actions>
+    <!-- Run: compila, copia al deploy de WildFly y abre el navegador -->
+    <action>
+        <actionName>run</actionName>
+        <activatedProfiles>
+            <activatedProfile>nb-run</activatedProfile>
+        </activatedProfiles>
+        <goals>
+            <goal>clean</goal>
+            <goal>package</goal>
+        </goals>
+        <properties>
+            <skipTests>true</skipTests>
+            <netbeans.deploy>false</netbeans.deploy>
+        </properties>
+    </action>
+    <!-- Debug: solo compila (NO arranca WildFly en modo debug) -->
+    <action>
+        <actionName>debug</actionName>
+        <goals>
+            <goal>clean</goal>
+            <goal>package</goal>
+        </goals>
+        <properties>
+            <skipTests>true</skipTests>
+            <netbeans.deploy>false</netbeans.deploy>
+        </properties>
+    </action>
+    <!-- Run file: solo compila -->
+    <action>
+        <actionName>run.single.deploy</actionName>
+        <goals>
+            <goal>clean</goal>
+            <goal>package</goal>
+        </goals>
+        <properties>
+            <skipTests>true</skipTests>
+            <netbeans.deploy>false</netbeans.deploy>
+        </properties>
+    </action>
+</actions>

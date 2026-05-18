@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:h="http://xmlns.jcp.org/jsf/html"
+      xmlns:f="http://xmlns.jcp.org/jsf/core"
+      xmlns:p="http://primefaces.org/ui"
+      xmlns:ui="http://xmlns.jcp.org/jsf/facelets">
+
+    <h:head>
+        <title>SENADI — Procesador de Documentos PDF</title>
+        <link rel="icon" type="image/png" href="#{request.contextPath}/resources/images/logo.png" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+        <meta http-equiv="Pragma" content="no-cache" />
+        <meta http-equiv="Expires" content="0" />
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet" />
+        <link rel="stylesheet" type="text/css" href="#{resource['css/style.css']}" />
+    </h:head>
+
+    <h:body>
+
+        <!-- ══ HEADER INSTITUCIONAL ══════════════════════════════ -->
+        <div class="senadi-header">
+            <div class="header-content">
+                <div class="header-logo">
+                    <img src="#{request.contextPath}/resources/images/fondo-logo.png" alt="SENADI" />
+                </div>
+                <div class="header-divider"></div>
+                <div class="header-text">
+                    <h1>Procesador de Gacetas</h1>
+                    <p class="subtitle">Sistema de generación de documentos PDF para publicación oficial</p>
+                </div>
+            </div>
+            <div class="header-accent"></div>
+        </div>
+
+        <!-- ══ BARRA DE USUARIO ═════════════════════════════════ -->
+        <div class="user-bar">
+            <div class="user-info">
+                <i class="pi pi-user"></i>
+                <span class="user-name">#{authBean.displayName}</span>
+                <span class="user-role#{authBean.admin ? ' role-admin' : ''}">#{authBean.roleLabel}</span>
+            </div>
+            <h:form id="logoutForm">
+                <p:commandButton value="Cerrar sesión"
+                                 action="#{authBean.logout}"
+                                 icon="pi pi-sign-out"
+                                 styleClass="btn-logout"
+                                 ajax="false" />
+            </h:form>
+        </div>
+
+        <!-- ══ CONTENIDO PRINCIPAL ═══════════════════════════════ -->
+        <div class="page-body">
+            <div class="main-card">
+
+                <!-- Card header -->
+                <div class="card-header">
+                    <div class="card-header-icon">
+                        <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+                    </div>
+                    <div class="card-header-text">
+                        <h2>Procesador de Documentos PDF</h2>
+                        <p>Busque por número de trámite o cargue archivos manualmente</p>
+                    </div>
+                </div>
+
+                <div class="card-body">
+                    <p:tabView id="tabView">
+
+                        <!-- ════ TAB 1: BÚSQUEDA POR NÚMERO ════════════ -->
+                        <p:tab title="Búsqueda por Número">
+                            <h:form id="searchForm">
+                                <p:growl id="searchMessages" showDetail="true"
+                                         life="3000" />
+
+                                <div class="search-layout">
+                                    <div class="search-main">
+                                        <!-- Barra de búsqueda -->
+                                        <div class="field-group">
+                                            <div class="field-label">
+                                                <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                                                Número de Trámite
+                                            </div>
+                                            <div class="search-bar">
+                                                <p:inputText id="codigo"
+                                                             value="#{pdfBean.codigoBusqueda}"
+                                                             placeholder="Ej: SENADI-2025-34937, IEPI-2017-12345 o 1072"
+                                                             styleClass="search-input" />
+                                                <p:commandButton value="Buscar"
+                                                                 action="#{pdfBean.buscar}"
+                                                                 process="@this codigo"
+                                                                 update="searchMessages searchResults batchPanel"
+                                                                 icon="pi pi-search"
+                                                                 styleClass="btn-buscar" />
+                                                <p:commandButton value="Limpiar" styleClass="btn-limpiar" icon="pi pi-refresh"
+                                                                 action="#{pdfBean.limpiar}"
+                                                                 update="searchMessages searchResults batchPanel codigo"/>
+                                            </div>
+                                            <div class="search-hint">
+                                                Ingrese el número de trámite (SENADI-/IEPI-) o el ID numérico del formulario
+                                            </div>
+                                        </div>
+
+                                        <h:panelGroup id="searchResults" layout="block">
+
+                                            <!-- ════ DATOS DE LA PATENTE (extraídos de BD) ════ -->
+                                            <h:panelGroup rendered="#{pdfBean.patentData != null}">
+                                                <div class="results-panel" style="margin-top:20px;">
+                                                    <div class="result-header">
+                                                        <h3>#{pdfBean.patentData.applicationNumber}</h3>
+                                                        <span class="badge badge-delivered">#{pdfBean.patentData.status}</span>
+                                                    </div>
+
+                                                    <!-- Alerta de publicación previa en gaceta -->
+                                                    <h:panelGroup rendered="#{pdfBean.publicadaEnGaceta}">
+                                                        <div class="gaceta-alert">
+                                                            <i class="pi pi-exclamation-triangle"></i>
+                                                            PATENTE YA PUBLICADA EN GACETA ANTERIOR
+                                                            <div style="margin-top:8px;font-weight:500;font-size:0.92em;">
+                                                                <div><strong>N.° de gaceta:</strong> #{pdfBean.gazetteInfo.gazetteNumber}</div>
+                                                            </div>
+                                                        </div>
+                                                    </h:panelGroup>
+
+                                                    <!-- Tipo de patente -->
+                                                    <div class="patent-type-banner">
+                                                        <span class="patent-type-label">
+                                                            <h:outputText value="#{pdfBean.patentData.tipoPatente}" rendered="#{not empty pdfBean.patentData.tipoPatente}" />
+                                                            <h:outputText value="Patente" rendered="#{empty pdfBean.patentData.tipoPatente}" />
+                                                        </span>
+                                                        <h:panelGroup rendered="#{not empty pdfBean.patentData.tipoPatenteAlias}">
+                                                            <span class="patent-type-alias">(<h:outputText value="#{pdfBean.patentData.tipoPatenteAlias}" />)</span>
+                                                        </h:panelGroup>
+                                                    </div>
+
+                                                    <!-- Información de la patente en grid -->
+                                                    <div class="result-info">
+                                                        <h:panelGroup rendered="#{pdfBean.patentData.fechaSolicitudTexto != null and not empty pdfBean.patentData.fechaSolicitudTexto}">
+                                                            <div class="info-item">
+                                                                <span class="info-label">Fecha de Solicitud</span>
+                                                                <span class="info-value">#{pdfBean.patentData.fechaSolicitudTexto}</span>
+                                                            </div>
+                                                        </h:panelGroup>
+
+                                                        <div class="info-item" style="grid-column: 1 / -1;">
+                                                            <span class="info-label">Título de la Patente</span>
+                                                            <span class="info-value" style="font-weight:600;">#{pdfBean.patentData.titulo}</span>
+                                                        </div>
+
+                                                        <h:panelGroup rendered="#{pdfBean.patentData.clasificacionInternacional != null and not empty pdfBean.patentData.clasificacionInternacional}">
+                                                            <div class="info-item" style="grid-column: 1 / -1;">
+                                                                <span class="info-label">Clasificación Internacional de Patente</span>
+                                                                <span class="info-value">#{pdfBean.patentData.clasificacionInternacional}</span>
+                                                            </div>
+                                                        </h:panelGroup>
+
+                                                        <div class="info-item" style="grid-column: 1 / -1;">
+                                                            <span class="info-label">Solicitante(s)</span>
+                                                            <span class="info-value">#{pdfBean.patentData.solicitantesTexto}</span>
+                                                        </div>
+
+                                                        <div class="info-item">
+                                                            <span class="info-label">País</span>
+                                                            <span class="info-value">#{pdfBean.patentData.paisesTexto}</span>
+                                                        </div>
+
+                                                        <h:panelGroup rendered="#{pdfBean.patentData.fechaPrioridadTexto != null}">
+                                                            <div class="info-item">
+                                                                <span class="info-label">Fecha de Prioridad</span>
+                                                                <span class="info-value">#{pdfBean.patentData.fechaPrioridadTexto}</span>
+                                                            </div>
+                                                        </h:panelGroup>
+
+                                                        <div class="info-item" style="grid-column: 1 / -1;">
+                                                            <span class="info-label">Representante / Apoderado</span>
+                                                            <span class="info-value">#{pdfBean.patentData.representanteTexto}</span>
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Resumen -->
+                                                    <div class="resumen-box">
+                                                        <div class="resumen-title">
+                                                            Resumen
+                                                        </div>
+                                                        <div class="resumen-content">
+                                                            <h:outputText value="#{pdfBean.patentData.resumen}" rendered="#{not empty pdfBean.patentData.resumen}" />
+                                                            <h:outputText value="(sin resumen)" rendered="#{empty pdfBean.patentData.resumen}" style="color:#999;font-style:italic;" />
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Archivos disponibles (según tipo de patente) -->
+                                                    <div class="files-available-box">
+                                                        <!-- PI/PC/MU → Reivindicaciones -->
+                                                        <h:panelGroup rendered="#{not pdfBean.patentData.disenoIndustrial}">
+                                                            <h:panelGroup rendered="#{pdfBean.patentData.reivindicacionesUrl != null}">
+                                                                <div class="file-check-ok">
+                                                                    <span class="label">✓ Reivindicaciones:</span>
+                                                                    <h:outputLink value="#{pdfBean.patentData.reivindicacionesUrl}" target="_blank">
+                                                                        #{pdfBean.patentData.reivindicacionesFile}
+                                                                    </h:outputLink>
+                                                                </div>
+                                                            </h:panelGroup>
+                                                            <h:panelGroup rendered="#{pdfBean.patentData.reivindicacionesUrl == null}">
+                                                                <span class="file-check-warn">
+                                                                    ⚠ No se encontró archivo de reivindicaciones en la BD
+                                                                </span>
+                                                            </h:panelGroup>
+                                                        </h:panelGroup>
+                                                        <!-- DI → Dibujos -->
+                                                        <h:panelGroup rendered="#{pdfBean.patentData.disenoIndustrial}">
+                                                            <h:panelGroup rendered="#{pdfBean.patentData.dibujosUrl != null}">
+                                                                <div class="file-check-ok">
+                                                                    <span class="label">✓ Dibujos:</span>
+                                                                    <h:outputLink value="#{pdfBean.patentData.dibujosUrl}" target="_blank">
+                                                                        #{pdfBean.patentData.dibujosFile}
+                                                                    </h:outputLink>
+                                                                </div>
+                                                            </h:panelGroup>
+                                                            <h:panelGroup rendered="#{pdfBean.patentData.dibujosUrl == null}">
+                                                                <span class="file-check-warn">
+                                                                    ⚠ No se encontró archivo de dibujos en la BD
+                                                                </span>
+                                                            </h:panelGroup>
+                                                        </h:panelGroup>
+                                                    </div>
+
+                                                    <!-- Botones de acción -->
+                                                    <div class="result-actions">
+                                                        <div class="action-buttons-row">
+                                                            <p:commandButton value="Generar PDF Individual (m)"
+                                                                             action="#{pdfBean.generarPdfDesdeBase}"
+                                                                             ajax="false"
+                                                                             icon="pi pi-file-pdf"
+                                                                             styleClass="btn-procesar"
+                                                                             style="flex:1;min-width:200px;" />
+                                                            <p:commandButton value="Agregar al Lote"
+                                                                             action="#{pdfBean.agregarAlLote}"
+                                                                             process="@this"
+                                                                             update="searchMessages batchPanel"
+                                                                             oncomplete="window.scrollTo({top:0,behavior:'smooth'})"
+                                                                             icon="pi pi-plus"
+                                                                             rendered="#{pdfBean.gazetteInfo eq null}"
+                                                                             styleClass="btn-lote-add"
+                                                                             style="min-width:160px;" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </h:panelGroup>
+
+                                            <!-- Resultados múltiples (lista para seleccionar) -->
+                                            <h:panelGroup rendered="#{not empty pdfBean.resultadosBusqueda and pdfBean.resultadosBusqueda.size() gt 1 and pdfBean.patentData == null}">
+                                                <div class="multi-results-bar">
+                                                    Se encontraron #{pdfBean.resultadosBusqueda.size()} trámites DELIVERED. Seleccione uno:
+                                                </div>
+                                                <ui:repeat var="res" value="#{pdfBean.resultadosBusqueda}">
+                                                    <div class="result-item-inline">
+                                                        <div>
+                                                            <strong>#{res.applicationNumber}</strong>
+                                                            <span class="item-meta">#{res.formTypeLabel}</span>
+                                                            <span class="item-meta">ID: #{res.formId}</span>
+                                                        </div>
+                                                        <p:commandButton value="Ver datos"
+                                                                         action="#{pdfBean.seleccionarResultado}"
+                                                                         update="searchMessages searchResults batchPanel"
+                                                                         icon="pi pi-eye"
+                                                                         styleClass="btn-buscar"
+                                                                         style="padding:6px 16px !important;font-size:0.85em !important;">
+                                                            <f:setPropertyActionListener target="#{pdfBean.resultadoSeleccionado}" value="#{res}" />
+                                                        </p:commandButton>
+                                                    </div>
+                                                </ui:repeat>
+                                            </h:panelGroup>
+
+                                            <!-- Mensaje sin resultados -->
+                                            <h:panelGroup rendered="#{empty pdfBean.resultadosBusqueda and pdfBean.mensajeBusqueda != null}">
+                                                <div class="no-results">
+                                                    <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                                                    <p><strong>#{pdfBean.mensajeBusqueda}</strong></p>
+                                                    <p style="font-size:0.82em;">Verifique el número de trámite e intente nuevamente</p>
+                                                </div>
+                                            </h:panelGroup>
+
+                                        </h:panelGroup>
+                                    </div>
+
+                                    <div class="search-sidebar">
+                                        <p:outputPanel id="batchPanel">
+                                            <div id="batchSectionDiv" class="batch-section">
+                                                <div class="batch-header">
+                                                    <h3>Lote de Generación</h3>
+                                                    <span class="batch-count">#{pdfBean.lotePat.size()} trámite(s)</span>
+                                                </div>
+
+                                                <div class="batch-empty" style="display:#{pdfBean.loteVacio ? 'block' : 'none'}">
+                                                    <i class="pi pi-inbox"></i>
+                                                    Busque trámites y use <strong>Agregar al Lote</strong> para añadirlos aquí.
+                                                </div>
+
+                                                <p:dataList var="item" value="#{pdfBean.lotePat}" type="unordered"
+                                                            rowIndexVar="idx" styleClass="batch-datalist"
+                                                            style="display:#{pdfBean.loteVacio ? 'none' : 'block'}">
+                                                    <div class="batch-item#{item.previouslyPublished ? ' batch-item-published' : ''}#{item.disenoIndustrial ? ' batch-item-design' : ''}">
+                                                        <div class="batch-item-num">#{idx + 1}</div>
+                                                        <div class="batch-item-info">
+                                                            <div class="batch-item-code">#{item.applicationNumber}</div>
+                                                            <div class="batch-item-title">#{item.tituloCorto}</div>
+                                                            <div class="batch-item-tipo">
+                                                                #{item.tipoPatente}
+                                                                <h:panelGroup rendered="#{item.previouslyPublished}">
+                                                                    <span class="badge-publicada">
+                                                                        <i class="pi pi-exclamation-triangle"></i> Publicada en gaceta
+                                                                    </span>
+                                                                </h:panelGroup>
+                                                            </div>
+                                                        </div>
+                                                        <div class="batch-item-actions">
+                                                            <p:commandButton icon="pi pi-arrow-up"
+                                                                             action="#{pdfBean.moverArriba(idx)}"
+                                                                             process="@this"
+                                                                             update=":tabView:searchForm:batchPanel"
+                                                                             styleClass="btn-batch-sm"
+                                                                             disabled="#{idx == 0}" />
+                                                            <p:commandButton icon="pi pi-arrow-down"
+                                                                             action="#{pdfBean.moverAbajo(idx)}"
+                                                                             process="@this"
+                                                                             update=":tabView:searchForm:batchPanel"
+                                                                             styleClass="btn-batch-sm"
+                                                                             disabled="#{idx == pdfBean.lotePat.size() - 1}" />
+                                                            <p:commandButton icon="pi pi-times"
+                                                                             action="#{pdfBean.prepararEliminarDelLote(idx)}"
+                                                                             process="@this"
+                                                                             update=":dlgEliminarForm"
+                                                                             oncomplete="PF('dlgConfirmEliminar').show()"
+                                                                             styleClass="btn-batch-sm btn-batch-rm" />
+                                                        </div>
+                                                    </div>
+                                                </p:dataList>
+
+                                                <div class="batch-footer" style="display:#{pdfBean.loteVacio ? 'none' : 'flex'}">
+                                                    <p:commandButton value="Generar PDF del Lote"
+                                                                     action="#{pdfBean.generarPdfLote}"
+                                                                     ajax="false"
+                                                                     icon="pi pi-file-pdf"
+                                                                     styleClass="btn-lote-gen" />
+                                                </div>
+                                            </div>
+                                        </p:outputPanel>
+
+
+                                    </div>
+                                </div>
+
+                            </h:form>
+                        </p:tab>
+
+                        <!-- ════ TAB 2: PROCESAMIENTO MANUAL ═══════════ -->
+                        <p:tab title="Carga Manual">
+                            <h:form id="mainForm" enctype="multipart/form-data">
+                                <p:growl id="mensajes" showDetail="true" life="6000" />
+
+                                <!-- ── Modo de procesamiento ──────────────── -->
+                                <div class="field-group">
+                                    <div class="field-label">
+                                        <svg viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                                        Modo de procesamiento
+                                    </div>
+                                    <p:selectOneRadio id="modo" value="#{pdfBean.modo}"
+                                                      layout="responsive" columns="2">
+                                        <f:selectItem itemLabel="Patentes / Modelos de Utilidad" itemValue="patente" />
+                                        <f:selectItem itemLabel="Diseños Industriales" itemValue="diseno" />
+                                    </p:selectOneRadio>
+                                </div>
+
+                                <div class="form-separator"></div>
+
+                                <!-- ── Datos de la patente (entrada manual) ── -->
+                                <div class="field-group">
+                                    <div class="field-label">
+                                        <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"/></svg>
+                                        Datos de la patente
+                                        <span class="field-hint">— Complete los campos que desee incluir</span>
+                                    </div>
+
+                                    <div class="manual-form-grid">
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manTipoPatente">Tipo de patente</label>
+                                            <p:inputText id="manTipoPatente" value="#{pdfBean.manTipoPatente}"
+                                                         placeholder="Ej: Patente de Invención"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manNumSolicitud">No. de Solicitud</label>
+                                            <p:inputText id="manNumSolicitud" value="#{pdfBean.manNumeroSolicitud}"
+                                                         placeholder="Ej: SENADI-2025-48394"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manFechaSol">Fecha de solicitud</label>
+                                            <p:inputText id="manFechaSol" value="#{pdfBean.manFechaSolicitud}"
+                                                         placeholder="Ej: 15/03/2025"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field manual-field-full">
+                                            <label class="manual-label" for="mainForm:manTitulo">Título de la Patente</label>
+                                            <p:inputText id="manTitulo" value="#{pdfBean.manTitulo}"
+                                                         placeholder="Título de la invención o diseño"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manClasif">Clasificación internacional</label>
+                                            <p:inputText id="manClasif" value="#{pdfBean.manClasificacion}"
+                                                         placeholder="Ej: A47C 1/00"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manSolicitante">Solicitante</label>
+                                            <p:inputText id="manSolicitante" value="#{pdfBean.manSolicitante}"
+                                                         placeholder="Nombre del solicitante"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manPais">País</label>
+                                            <p:inputText id="manPais" value="#{pdfBean.manPais}"
+                                                         placeholder="Ej: Ecuador"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field">
+                                            <label class="manual-label" for="mainForm:manFechaPrio">Fecha de Prioridad</label>
+                                            <p:inputText id="manFechaPrio" value="#{pdfBean.manFechaPrioridad}"
+                                                         placeholder="Ej: 01/01/2024"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field manual-field-full">
+                                            <label class="manual-label" for="mainForm:manRepresentante">Representante / Apoderado</label>
+                                            <p:inputText id="manRepresentante" value="#{pdfBean.manRepresentante}"
+                                                         placeholder="Nombre del representante"
+                                                         styleClass="manual-input" />
+                                        </div>
+                                        <div class="manual-field manual-field-full">
+                                            <label class="manual-label" for="mainForm:manResumen">Resumen</label>
+                                            <p:inputTextarea id="manResumen" value="#{pdfBean.manResumen}"
+                                                             rows="4"
+                                                             placeholder="Resumen o abstract de la patente"
+                                                             styleClass="manual-input manual-textarea" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="form-separator"></div>
+
+                                <!-- ── Reivindicaciones / Figuras PDF ──────── -->
+                                <div class="field-group">
+                                    <div class="field-label">
+                                        <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        Reivindicaciones / Figuras (PDF)
+                                        <span class="field-hint">— Opcional. Según el modo seleccionado</span>
+                                    </div>
+                                    <div class="upload-zone">
+                                        <p:fileUpload id="manSegundoPdf"
+                                                      value="#{pdfBean.manSegundoPdf}"
+                                                      mode="simple"
+                                                      skinSimple="true"
+                                                      allowTypes="/(\.|\/)(pdf)$/"
+                                                      label="Seleccionar PDF" />
+                                    </div>
+                                </div>
+
+                                <!-- ── Botón de acción ────────────────────── -->
+                                <div class="action-section">
+                                    <p:commandButton value="Procesar y Descargar PDF"
+                                                     action="#{pdfBean.procesarManual}"
+                                                     ajax="false"
+                                                     icon="pi pi-download"
+                                                     styleClass="btn-procesar" />
+                                </div>
+
+                            </h:form>
+                        </p:tab>
+
+                        <!-- ════ TAB 3: DATOS CON HOJAS EN BLANCO ════════ -->
+                        <p:tab title="Datos con hojas en blanco">
+                            <h:form id="blankForm">
+                                <p:messages id="blankMessages" showDetail="true" closable="true" />
+
+                                <div class="search-layout">
+                                    <div class="search-main">
+                                        <!-- Barra de búsqueda -->
+                                        <div class="field-group">
+                                            <div class="field-label">
+                                                <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                                                Buscar trámite
+                                            </div>
+                                            <div class="search-bar">
+                                                <p:inputText id="codigoBlank"
+                                                             value="#{pdfBean.codigoBusquedaBlank}"
+                                                             placeholder="Ej: SENADI-2025-34937, IEPI-2017-12345 o 1072"
+                                                             styleClass="search-input" />
+                                                <p:commandButton value="Buscar"
+                                                                 action="#{pdfBean.buscarBlank}"
+                                                                 process="@this codigoBlank"
+                                                                 update="blankMessages blankSearchResults blankBatchPanel"
+                                                                 icon="pi pi-search"
+                                                                 styleClass="btn-buscar" />
+                                                <p:commandButton value="Limpiar" styleClass="btn-limpiar" icon="pi pi-refresh"
+                                                                 action="#{pdfBean.limpiarBlank}"                                                                 update="blankMessages blankSearchResults blankBatchPanel codigoBlank"/>
+                                            </div>
+                                            <div class="search-hint">
+                                                Genera PDF solo con datos + separador de bandera + hojas en blanco. Sin reivindicaciones ni dibujos.
+                                            </div>
+                                        </div>
+
+                                        <h:panelGroup id="blankSearchResults" layout="block">
+
+                                            <!-- Datos de la patente encontrada -->
+                                            <h:panelGroup rendered="#{pdfBean.patentDataBlank != null}">
+                                                <div class="results-panel" style="margin-top:20px;">
+                                                    <div class="result-header">
+                                                        <h3>#{pdfBean.patentDataBlank.applicationNumber}</h3>
+                                                        <span class="badge badge-delivered">#{pdfBean.patentDataBlank.status}</span>
+                                                    </div>
+
+                                                    <div class="patent-type-banner">
+                                                        <span class="patent-type-label">
+                                                            <h:outputText value="#{pdfBean.patentDataBlank.tipoPatente}" rendered="#{not empty pdfBean.patentDataBlank.tipoPatente}" />
+                                                            <h:outputText value="Patente" rendered="#{empty pdfBean.patentDataBlank.tipoPatente}" />
+                                                        </span>
+                                                    </div>
+
+                                                    <div class="result-info">
+                                                        <h:panelGroup rendered="#{pdfBean.patentDataBlank.fechaSolicitudTexto != null and not empty pdfBean.patentDataBlank.fechaSolicitudTexto}">
+                                                            <div class="info-item">
+                                                                <span class="info-label">Fecha de Solicitud</span>
+                                                                <span class="info-value">#{pdfBean.patentDataBlank.fechaSolicitudTexto}</span>
+                                                            </div>
+                                                        </h:panelGroup>
+
+                                                        <div class="info-item" style="grid-column: 1 / -1;">
+                                                            <span class="info-label">Título de la Patente</span>
+                                                            <span class="info-value" style="font-weight:600;">#{pdfBean.patentDataBlank.titulo}</span>
+                                                        </div>
+
+                                                        <div class="info-item" style="grid-column: 1 / -1;">
+                                                            <span class="info-label">Solicitante(s)</span>
+                                                            <span class="info-value">#{pdfBean.patentDataBlank.solicitantesTexto}</span>
+                                                        </div>
+
+                                                        <div class="info-item">
+                                                            <span class="info-label">País</span>
+                                                            <span class="info-value">#{pdfBean.patentDataBlank.paisesTexto}</span>
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Botón agregar al lote blank -->
+                                                    <div class="result-actions">
+                                                        <p:commandButton value="Agregar al Lote"
+                                                                         action="#{pdfBean.agregarAlLoteBlank}"
+                                                                         process="@this"
+                                                                         update="blankMessages blankBatchPanel"
+                                                                         icon="pi pi-plus"
+                                                                         styleClass="btn-lote-add"
+                                                                         
+                                                                         style="min-width:160px;" />
+                                                    </div>
+                                                </div>
+                                            </h:panelGroup>
+
+                                            <!-- Resultados múltiples -->
+                                            <h:panelGroup rendered="#{not empty pdfBean.resultadosBusquedaBlank and pdfBean.resultadosBusquedaBlank.size() gt 1 and pdfBean.patentDataBlank == null}">
+                                                <div class="multi-results-bar">
+                                                    Se encontraron #{pdfBean.resultadosBusquedaBlank.size()} trámites. Seleccione uno:
+                                                </div>
+                                                <ui:repeat var="resB" value="#{pdfBean.resultadosBusquedaBlank}">
+                                                    <div class="result-item-inline">
+                                                        <div>
+                                                            <strong>#{resB.applicationNumber}</strong>
+                                                            <span class="item-meta">#{resB.formTypeLabel}</span>
+                                                            <span class="item-meta">ID: #{resB.formId}</span>
+                                                        </div>
+                                                        <p:commandButton value="Ver datos"
+                                                                         action="#{pdfBean.seleccionarResultadoBlank}"
+                                                                         update="blankMessages blankSearchResults blankBatchPanel"
+                                                                         icon="pi pi-eye"
+                                                                         styleClass="btn-buscar"
+                                                                         style="padding:6px 16px !important;font-size:0.85em !important;">
+                                                            <f:setPropertyActionListener target="#{pdfBean.resultadoSeleccionadoBlank}" value="#{resB}" />
+                                                        </p:commandButton>
+                                                    </div>
+                                                </ui:repeat>
+                                            </h:panelGroup>
+
+                                            <!-- Sin resultados -->
+                                            <h:panelGroup rendered="#{empty pdfBean.resultadosBusquedaBlank and pdfBean.mensajeBusquedaBlank != null}">
+                                                <div class="no-results">
+                                                    <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                                                    <p><strong>#{pdfBean.mensajeBusquedaBlank}</strong></p>
+                                                    <p style="font-size:0.82em;">Verifique el número de trámite e intente nuevamente</p>
+                                                </div>
+                                            </h:panelGroup>
+
+                                        </h:panelGroup>
+                                    </div>
+
+                                    <!-- Sidebar: lote blank -->
+                                    <div class="search-sidebar">
+                                        <p:outputPanel id="blankBatchPanel">
+                                            <div class="batch-section">
+                                                <div class="batch-header">
+                                                    <h3>Lote — Hojas en Blanco</h3>
+                                                    <span class="batch-count">#{pdfBean.loteBlank.size()} trámite(s)</span>
+                                                </div>
+
+                                                <div class="batch-empty" style="display:#{pdfBean.loteBlankVacio ? 'block' : 'none'}">
+                                                    <i class="pi pi-inbox"></i>
+                                                    Busque trámites y use <strong>Agregar al Lote</strong> para añadirlos aquí.<br/>
+                                                    <span style="font-size:0.85em;color:#aaa;">Solo datos + bandera + hojas en blanco</span>
+                                                </div>
+
+                                                <p:dataList var="bItem" value="#{pdfBean.loteBlank}" type="unordered"
+                                                            rowIndexVar="bIdx" styleClass="batch-datalist"
+                                                            style="display:#{pdfBean.loteBlankVacio ? 'none' : 'block'}">
+                                                    <div class="batch-item">
+                                                        <div class="batch-item-num">#{bIdx + 1}</div>
+                                                        <div class="batch-item-info">
+                                                            <div class="batch-item-code">#{bItem.applicationNumber}</div>
+                                                            <div class="batch-item-title">#{bItem.tituloCorto}</div>
+                                                            <div class="batch-item-tipo">#{bItem.tipoPatente}</div>
+                                                        </div>
+                                                        <div class="batch-item-actions">
+                                                            <p:commandButton icon="pi pi-arrow-up"
+                                                                             action="#{pdfBean.moverArribaBlank(bIdx)}"
+                                                                             process="@this"
+                                                                             update=":tabView:blankForm:blankBatchPanel"
+                                                                             styleClass="btn-batch-sm"
+                                                                             disabled="#{bIdx == 0}" />
+                                                            <p:commandButton icon="pi pi-arrow-down"
+                                                                             action="#{pdfBean.moverAbajoBlank(bIdx)}"
+                                                                             process="@this"
+                                                                             update=":tabView:blankForm:blankBatchPanel"
+                                                                             styleClass="btn-batch-sm"
+                                                                             disabled="#{bIdx == pdfBean.loteBlank.size() - 1}" />
+                                                            <p:commandButton icon="pi pi-times"
+                                                                             action="#{pdfBean.eliminarDelLoteBlank(bIdx)}"
+                                                                             process="@this"
+                                                                             update=":tabView:blankForm:blankMessages :tabView:blankForm:blankBatchPanel"
+                                                                             styleClass="btn-batch-sm btn-batch-rm" />
+                                                        </div>
+                                                    </div>
+                                                </p:dataList>
+
+                                                <div class="batch-footer" style="display:#{pdfBean.loteBlankVacio ? 'none' : 'flex'}">
+                                                    <p:commandButton value="Generar PDF del Lote"
+                                                                     action="#{pdfBean.generarPdfLoteBlank}"
+                                                                     ajax="false"
+                                                                     icon="pi pi-file-pdf"
+                                                                     styleClass="btn-lote-gen" />
+                                                    <p:commandButton value="Vaciar"
+                                                                     action="#{pdfBean.vaciarLoteBlank}"
+                                                                     process="@this"
+                                                                     update="blankMessages blankBatchPanel"
+                                                                     icon="pi pi-trash"
+                                                                     styleClass="btn-lote-clear" />
+                                                </div>
+                                            </div>
+                                        </p:outputPanel>
+                                    </div>
+                                </div>
+                            </h:form>
+                        </p:tab>
+
+                        <!-- ════ TAB 4: ADMINISTRACIÓN (solo Admin) ═══════ -->
+                        <p:tab title="Administración" rendered="#{authBean.admin}">
+                            <h:form id="adminForm">
+                                <p:messages id="adminMessages" showDetail="true" closable="true" />
+
+                                <div class="admin-section">
+                                    <!-- Área de número de gaceta + botones -->
+                                    <div class="admin-actions" style="margin-bottom:20px;">
+                                        <div>
+                                            <label class="admin-gazette-label">
+                                                Número de Gaceta para confirmación
+                                            </label>
+                                            <div class="admin-gazette-input">
+                                                <p:inputText id="numGaceta"
+                                                             value="#{pdfBean.numeroGacetaGuardar}"
+                                                             placeholder="Ej: 850" />
+                                            </div>
+                                        </div>
+                                        <p:commandButton value="Confirmar publicación"
+                                                         action="#{pdfBean.guardarEnGaceta}"
+                                                         update="adminMessages adminTable :tabView:searchForm:batchPanel"
+                                                         icon="pi pi-check-circle"
+                                                         styleClass="btn-admin-save"
+                                                         style="height:38px;"
+                                                         onclick="return confirm('\u00bfConfirmar la publicaci\u00f3n de todos los tr\u00e1mites pendientes en esta gaceta?')" />
+                                        <p:commandButton value="Recargar pendientes"
+                                                         action="#{pdfBean.recargarLoteDesdeBD}"
+                                                         update="adminMessages adminTable :tabView:searchForm:batchPanel"
+                                                         icon="pi pi-refresh"
+                                                         styleClass="btn-admin-clear"
+                                                         style="height:38px;" />
+                                    </div>
+
+                                    <!-- Tabla de items pendientes -->
+                                    <p:outputPanel id="adminTable">
+                                        <h:panelGroup rendered="#{pdfBean.loteVacio}">
+                                            <div class="admin-empty">
+                                                <i class="pi pi-inbox"></i>
+                                                No hay trámites pendientes de publicación.<br/>
+                                                Agregue trámites al lote para que aparezcan aquí.
+                                            </div>
+                                        </h:panelGroup>
+
+                                        <h:panelGroup rendered="#{not pdfBean.loteVacio}">
+                                            <div class="admin-table-wrap">
+                                                <p:dataTable var="item"
+                                                             value="#{pdfBean.lotePat}"
+                                                             rows="50"
+                                                             paginator="true"
+                                                             paginatorPosition="bottom"
+                                                             emptyMessage="Sin registros">
+                                                    <f:facet name="header">
+                                                        Trámites pendientes de publicación en gaceta
+                                                        (#{pdfBean.lotePat.size()} pendiente(s))
+                                                    </f:facet>
+
+                                                    <p:column headerText="#" style="width:40px;text-align:center;">
+                                                        #{pdfBean.lotePat.indexOf(item) + 1}
+                                                    </p:column>
+                                                    <p:column headerText="Trámite" style="width:180px;">
+                                                        #{item.applicationNumber}
+                                                    </p:column>
+                                                    <p:column headerText="Título">
+                                                        #{item.titulo}
+                                                    </p:column>
+                                                    <p:column headerText="Tipo" style="width:140px;">
+                                                        #{item.tipoPatente}
+                                                    </p:column>
+                                                    <p:column headerText="Fecha Solicitud" style="width:130px;">
+                                                        #{item.fechaSolicitud}
+                                                    </p:column>
+                                                </p:dataTable>
+                                            </div>
+                                        </h:panelGroup>
+                                    </p:outputPanel>
+                                </div>
+                            </h:form>
+                        </p:tab>
+
+                    </p:tabView>
+                </div>
+            </div>
+        </div>
+
+        <!-- Diálogo de confirmación para patentes publicadas en gaceta -->
+        <h:form id="dlgForm">
+            <p:dialog id="dlgConfirmPublicado"
+                      header="Patente publicada anteriormente"
+                      widgetVar="dlgConfirmPublicado"
+                      modal="true" closable="true"
+                      resizable="false" draggable="false"
+                      appendTo="@(body)"
+                      width="460" styleClass="dlg-publicada">
+                <div class="dlg-publicada-body">
+                    <i class="pi pi-exclamation-triangle dlg-icon-warning"></i>
+                    <p class="dlg-title-text">
+                        Esta patente ya fue publicada en una gaceta anterior.
+                    </p>
+                    <h:panelGroup rendered="#{pdfBean.gazetteInfo != null}">
+                        <p class="dlg-gazette-info">
+                            Gaceta N.° #{pdfBean.gazetteInfo.gazetteNumber}
+                        </p>
+                    </h:panelGroup>
+                    <p class="dlg-body-text">
+                        ¿Desea agregarla de todos modos al lote de generación?
+                    </p>
+                    <div class="dlg-actions">
+                        <p:commandButton value="Sí, agregar"
+                                         action="#{pdfBean.confirmarAgregarAlLote}"
+                                         process="@this"
+                                         update=":tabView:searchForm:searchMessages :tabView:searchForm:batchPanel"
+                                         oncomplete="PF('dlgConfirmPublicado').hide()"
+                                         icon="pi pi-check"
+                                         styleClass="btn-procesar"
+                                         style="min-width:130px;" />
+                        <p:commandButton value="No, cancelar"
+                                         action="#{pdfBean.cancelarAgregarAlLote}"
+                                         process="@this"
+                                         update=":tabView:searchForm:searchMessages"
+                                         oncomplete="PF('dlgConfirmPublicado').hide()"
+                                         icon="pi pi-times"
+                                         styleClass="btn-lote-clear"
+                                         style="min-width:130px;" />
+                    </div>
+                </div>
+            </p:dialog>
+            <p:ajaxStatus onstart="PF('statusDialog').show()" onsuccess="PF('statusDialog').hide()" />
+
+                <p:dialog widgetVar="statusDialog" modal="true" draggable="false" closable="false" 
+                          resizable="false" showHeader="false" style="margin-bottom: 200px !important">
+                    <p:graphicImage name="/images/loader_1.gif" 
+                                    style="width: 50px !important; height: 50px !important; background-color: transparent !important;"/>
+                </p:dialog>
+        </h:form>
+
+        <!-- Diálogo de confirmación para eliminar trámite del lote -->
+        <h:form id="dlgEliminarForm">
+            <p:dialog id="dlgConfirmEliminar"
+                      header="Confirmar eliminación"
+                      widgetVar="dlgConfirmEliminar"
+                      modal="true" closable="true"
+                      resizable="false" draggable="false"
+                      appendTo="@(body)"
+                      width="460" styleClass="dlg-publicada">
+                <div class="dlg-publicada-body">
+                    <i class="pi pi-exclamation-triangle dlg-icon-warning"></i>
+                    <p class="dlg-title-text">
+                        ¿Seguro que quiere eliminar el trámite
+                        "#{pdfBean.nombrePendienteEliminar}" del lote?
+                    </p>
+                    <p class="dlg-body-text">
+                        Se eliminará también de la base de datos de pendientes.
+                    </p>
+                    <div class="dlg-actions">
+                        <p:commandButton value="Sí, eliminar"
+                                         action="#{pdfBean.confirmarEliminarDelLote}"
+                                         process="@this"
+                                         update=":tabView:searchForm:searchMessages :tabView:searchForm:batchPanel"
+                                         oncomplete="PF('dlgConfirmEliminar').hide()"
+                                         icon="pi pi-check"
+                                         styleClass="btn-procesar"
+                                         style="min-width:130px;" />
+                        <p:commandButton value="No, cancelar"
+                                         type="button"
+                                         onclick="PF('dlgConfirmEliminar').hide()"
+                                         icon="pi pi-times"
+                                         styleClass="btn-lote-clear"
+                                         style="min-width:130px;" />
+                    </div>
+                </div>
+            </p:dialog>
+        </h:form>
+
+        <!-- ══ FOOTER ════════════════════════════════════════════ -->
+        <div class="senadi-footer">
+            <div class="footer-logo">
+                <img src="#{request.contextPath}/resources/images/fondo-logo.png" alt="SENADI" />
+            </div>
+            <div class="footer-line">
+                <strong>SENADI</strong> — Servicio Nacional de Derechos Intelectuales
+            </div>
+            <div class="footer-line">
+                República del Ecuador <span class="footer-sep">|</span>
+                <a href="https://www.derechosintelectuales.gob.ec" target="_blank">www.derechosintelectuales.gob.ec</a>
+                <span class="footer-sep">|</span> &#169; 2026
+            </div>
+        </div>
+
+    </h:body>
+</html>
