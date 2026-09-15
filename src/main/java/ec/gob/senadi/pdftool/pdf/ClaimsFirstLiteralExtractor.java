@@ -57,12 +57,12 @@ public class ClaimsFirstLiteralExtractor {
     private static final Pattern REIV_SECOND_CLAIM_LINE =
             Pattern.compile("(?i)^(\\d{1,3}\\s+)?\\[?\\s*reivindicaci[oó]n\\s+2\\s*[.:\\-]?\\s*\\]?");
 
-    /** Título de sección "REIVINDICACIONES" / "Reivindicaciones" */
+    /** Título de sección: "REIVINDICACIONES" (ES) o "CLAIMS" (EN). */
     private static final Pattern REIV_HEADER_PATTERN =
-            Pattern.compile("(?i)^(\\d{1,3}\\s+)?reivindicaciones\\s*$");
-    /** Patrón más flexible: "reivindicaciones" en cualquier parte de la línea */
+            Pattern.compile("(?i)^(\\d{1,3}\\s+)?(reivindicaciones|claims|what\\s+is\\s+claimed)\\s*[:.]?\\s*$");
+    /** Patrón flexible: las mismas palabras en cualquier parte de la línea. */
     private static final Pattern REIV_HEADER_LOOSE =
-            Pattern.compile("(?i)(\\d{1,3}\\s+)?reivindicaciones");
+            Pattern.compile("(?i)(\\d{1,3}\\s+)?(reivindicaciones|claims|what\\s+is\\s+claimed)");
 
     // ── Compatibilidad: formato "Rn:" / "Rn." (convención ecuatoriana R1, R2, …) ──
     private static final Pattern R_CLAIM_FIRST_DETECTOR =

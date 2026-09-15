@@ -2,7 +2,11 @@ package ec.gob.senadi.pdftool.service;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.apache.pdfbox.multipdf.PDFMergerUtility;
@@ -21,7 +25,9 @@ import org.apache.pdfbox.text.TextPosition;
 import ec.gob.senadi.pdftool.model.PatentData;
 import ec.gob.senadi.pdftool.pdf.BatchPatentPdfComposer;
 import ec.gob.senadi.pdftool.pdf.ClaimsFirstLiteralExtractor;
+import ec.gob.senadi.pdftool.pdf.ClaimsHeaderFooterDetector;
 import ec.gob.senadi.pdftool.pdf.ContentStreamFragmenter;
+import ec.gob.senadi.pdftool.pdf.FigureUnit;
 import ec.gob.senadi.pdftool.pdf.FiguresProcessor;
 import ec.gob.senadi.pdftool.pdf.FormularioProcessor;
 import ec.gob.senadi.pdftool.pdf.PatentPdfGenerator;
@@ -155,8 +161,25 @@ public class PdfProcessingService {
             float destY = destBodyBottom + remainingY;
             PDPage currentDestPage = destDoc.getPage(destDoc.getNumberOfPages() - 1);
 
+            // ── Padding fijo (~2 cm) entre los datos del trámite y las reivindicaciones ──
+            final float CLAIMS_TOP_PAD = 25f; //29f;//35f; //57f;
+            destY -= CLAIMS_TOP_PAD;
+            if (destY - destBodyBottom < 30f) {
+                currentDestPage = new PDPage(PDRectangle.A4);
+                destDoc.addPage(currentDestPage);
+                destY = destBodyTop;
+            }
+
             LOG.info("insertClaimContentStream: srcPages " + firstSrcPage + "-" + lastSrcPage
                     + ", destY=" + destY + ", available=" + (destY - destBodyBottom));
+
+            // ── Detectar bands de header/footer ──
+            // Analizar TODAS las páginas del PDF de claims (no solo las que se
+            // extraen) para maximizar las señales de repetición: si una sola
+            // página de la 1ª reivindicación contiene un header repetido, sin
+            // mirar las demás páginas no podríamos detectarlo.
+            Map<Integer, float[]> hfBands = ClaimsHeaderFooterDetector.detectBands(
+                    claimsDoc, 0, totalSrcPages - 1);
 
             for (int srcIdx = firstSrcPage; srcIdx <= lastSrcPage && srcIdx < totalSrcPages; srcIdx++) {
                 PDPage srcPage = claimsDoc.getPage(srcIdx);
@@ -195,6 +218,14 @@ public class PdfProcessingService {
                     srcVisBottom = claim2PdfY + 2f;
                 } else {
                     srcVisBottom = 20f;
+                }
+
+                // ── Aplicar bands de header/footer detectados ──
+                float[] band = hfBands.get(srcIdx);
+                if (band != null) {
+                    // band[0] = topAllowedPdfY, band[1] = bottomAllowedPdfY
+                    if (band[0] < srcVisTop)      srcVisTop = band[0];
+                    if (band[1] > srcVisBottom)   srcVisBottom = band[1];
                 }
 
                 srcVisTop = Math.min(srcVisTop, srcH);
@@ -237,58 +268,98 @@ public class PdfProcessingService {
                         + " visTop=" + srcVisTop + " visBot=" + srcVisBottom
                         + " height=" + totalHeight);
 
-                // ── Colocar fragmentos por sub-rango Y ──
-                float placed = 0f;
+                // ── Dividir el rango en sub-rangos densos (comprime gaps grandes) ──
+                // Sirve para que un salto de página del PDF original no genere
+                // un hueco vertical en el PDF final: el texto fluye continuo.
+                List<float[]> denseSubRanges = ClaimsHeaderFooterDetector.detectDenseSubRanges(
+                        claimsDoc, srcIdx, srcVisBottom, srcVisTop, 25f);
+                if (denseSubRanges.isEmpty()) {
+                    denseSubRanges = java.util.Collections.singletonList(
+                            new float[]{srcVisTop, srcVisBottom});
+                }
+                LOG.info("insertClaimContentStream: srcPage " + srcIdx
+                       + " → " + denseSubRanges.size() + " sub-rangos densos");
 
-                while (placed < totalHeight - 0.5f) {
-                    float available = destY - destBodyBottom;
+                float pageMaxH = destBodyTop - destBodyBottom;
 
-                    if (available < 30f) {
-                        currentDestPage = new PDPage(PDRectangle.A4);
-                        destDoc.addPage(currentDestPage);
-                        destY = destBodyTop;
-                        available = destBodyTop - destBodyBottom;
-                    }
+                for (float[] sr : denseSubRanges) {
+                    float subTop = sr[0];
+                    float subBot = sr[1];
+                    if (subTop <= subBot + 0.5f) continue;
 
-                    float fragH = Math.min(totalHeight - placed, available);
+                    // ── Pre-detectar rangos Y de imágenes/fórmulas en el sub-rango ──
+                    List<float[]> imageRanges = ContentStreamFragmenter.extractXObjectYRanges(
+                            srcPage, subBot, subTop);
 
-                    // Rango Y del fragmento en coordenadas fuente
-                    float fragTop = srcVisTop - placed;
-                    float fragBot = fragTop - fragH;
+                    float subHeight = subTop - subBot;
+                    float placed = 0f;
 
-                    // Extraer content stream filtrado por este sub-rango Y
-                    ContentStreamFragmenter.FragmentResult fragment =
-                            ContentStreamFragmenter.extractByYRange(srcPage, fragBot, fragTop);
+                    while (placed < subHeight - 0.5f) {
+                        float available = destY - destBodyBottom;
 
-                    if (fragment.hasContent()) {
-                        // Offset: fragTop en src → destY en dest
-                        float offsetY = destY - fragTop;
-
-                        // Copiar todos los recursos (con resolución de conflictos).
-                        // En la primera página, las fuentes de OpenPDF (Helvetica)
-                        // ya ocupan nombres como /F1, /F2. Si las fuentes del PDF
-                        // de reivindicaciones usan los mismos nombres, se renombran
-                        // y el mapeo se aplica al content stream.
-                        java.util.Map<org.apache.pdfbox.cos.COSName, org.apache.pdfbox.cos.COSName> remap =
-                                ContentStreamFragmenter.copyAllResources(srcPage, currentDestPage);
-                        if (!remap.isEmpty()) {
-                            LOG.info("insertClaimContentStream: remapeo de recursos: " + remap);
-                            ContentStreamFragmenter.remapResourceNames(fragment.tokens, remap);
+                        if (available < 30f) {
+                            currentDestPage = new PDPage(PDRectangle.A4);
+                            destDoc.addPage(currentDestPage);
+                            destY = destBodyTop;
+                            available = destBodyTop - destBodyBottom;
                         }
 
-                        // Escribir al destino con traslación Y + clipping.
-                        // clipTop lleva +15pt para no cortar ascendentes de la primera
-                        // línea de texto (la baseline coincide con destY, pero las letras
-                        // se extienden ~12pt por encima).
-                        float clipBottom = Math.max(destY - fragH, destBodyBottom);
-                        float clipTop = Math.min(destY + 15f, 842f);
-                        ContentStreamFragmenter.writeToPage(
-                                destDoc, currentDestPage, fragment.tokens, offsetY,
-                                clipBottom, clipTop);
-                    }
+                        float fragH = Math.min(subHeight - placed, available);
+                        float fragTop = subTop - placed;
+                        float fragBot = fragTop - fragH;
 
-                    destY -= fragH;
-                    placed += fragH;
+                        // ── Ajustar fragBot para no cortar una imagen/fórmula ──
+                        boolean forceNewPage = false;
+                        for (float[] img : imageRanges) {
+                            float imgBot = img[0];
+                            float imgTop = img[1];
+                            if (imgBot >= fragTop || imgTop <= fragBot) continue;
+                            if (fragBot > imgBot && fragBot < imgTop) {
+                                float reqH    = fragTop - imgBot;
+                                float beforeH = fragTop - imgTop;
+                                if (reqH <= available) {
+                                    fragBot = imgBot;
+                                    fragH = reqH;
+                                } else if (beforeH >= 30f) {
+                                    fragBot = imgTop;
+                                    fragH = beforeH;
+                                } else if ((imgTop - imgBot) > pageMaxH) {
+                                    fragBot = imgBot;
+                                    fragH = reqH;
+                                } else {
+                                    forceNewPage = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (forceNewPage) {
+                            currentDestPage = new PDPage(PDRectangle.A4);
+                            destDoc.addPage(currentDestPage);
+                            destY = destBodyTop;
+                            continue;
+                        }
+
+                        ContentStreamFragmenter.FragmentResult fragment =
+                                ContentStreamFragmenter.extractByYRange(srcPage, fragBot, fragTop);
+
+                        if (fragment.hasContent()) {
+                            float offsetY = destY - fragTop;
+                            java.util.Map<org.apache.pdfbox.cos.COSName, org.apache.pdfbox.cos.COSName> remap =
+                                    ContentStreamFragmenter.copyAllResources(srcPage, currentDestPage);
+                            if (!remap.isEmpty()) {
+                                ContentStreamFragmenter.remapResourceNames(fragment.tokens, remap);
+                            }
+                            float clipBottom = Math.max(destY - fragH - 8f, destBodyBottom - 5f);
+                            float clipTop    = Math.min(destY + 20f, 842f);
+                            ContentStreamFragmenter.writeToPage(
+                                    destDoc, currentDestPage, fragment.tokens, offsetY,
+                                    clipBottom, clipTop);
+                            destY -= fragH;
+                        }
+                        // Si el fragmento no tiene contenido, no movemos destY:
+                        // el espacio vacío del fuente se comprime en el destino.
+                        placed += fragH;
+                    }
                 }
             }
 
@@ -305,11 +376,16 @@ public class PdfProcessingService {
             Pattern.compile("(?i)(figura|fig\\.?|figure)\\s*\\d+");
 
     /**
-     * Inserta TODAS las figuras del PDF de dibujos directamente en el documento
-     * destino, en continuidad después de los datos de patente.
-     * Cada figura se coloca con título "FIGURA N" centrado encima.
-     * Se aprovecha el espacio disponible en cada página; si una figura
-     * no cabe en el espacio restante, se crea una nueva página.
+     * Inserta las figuras del PDF de dibujos en el documento destino.
+     *
+     * Reglas de colocación (Diseños Industriales):
+     *   - Cada figura se presenta en su tamaño físico original (renderizado
+     *     a 200 DPI → pt). Solo se reduce si excede el área útil A4.
+     *   - Una figura por página: cada dibujo en su propia hoja.
+     *   - La primera figura (junto con el título de sección "DIBUJOS")
+     *     se intenta colocar en la página del encabezado de datos si cabe
+     *     en el espacio remanente; si no cabe, se desplaza a la siguiente página.
+     *   - Cada figura lleva su etiqueta "FIGURA N" centrada encima.
      *
      * @param remainingY espacio vertical disponible (en pt) debajo de los datos
      */
@@ -320,8 +396,7 @@ public class PdfProcessingService {
         try (PDDocument destDoc = PDDocument.load(destBytes);
              PDDocument srcDoc = PDDocument.load(dibujosPdf)) {
 
-            // Extraer todas las imágenes del PDF de dibujos
-            List<FigureData> figures = extractFigureImages(srcDoc);
+            List<FigureUnit> figures = extractFigureImagesByPage(srcDoc);
             if (figures.isEmpty()) {
                 LOG.warning("insertFiguresContinuous: no se encontraron imágenes en el PDF de dibujos");
                 return;
@@ -337,36 +412,50 @@ public class PdfProcessingService {
             float usableW = pageW - marginL - marginR;
             float bodyTop = pageH - marginT;
             float bodyBottom = marginB;
+            float usableH = bodyTop - bodyBottom;
 
-            // ── Layout compacto: adaptativo según cantidad de figuras ──
-            boolean fewFigures = figures.size() <= 2;
-            float labelH = 14f;       // altura para etiqueta "FIGURA N"
-            float rowGap = 8f;        // espacio entre filas
-            float colGap = 12f;       // espacio entre columnas
-            float cellW = fewFigures ? usableW : (usableW - colGap) / 2f;
-            float maxCellImgH = fewFigures ? 280f : 180f; // más grande para 1-2 figuras
+            final float sectionTitleTopPad = 25f; //29f; //57f;  // ~2 cm antes del título "DIBUJOS"
+            final float sectionTitleH = 22f;
 
-            // Posición actual: usar remainingY del generador de datos
+            // ── Pre-crear imágenes PDFBox y calcular tamaño final ──
+            // Tamaño físico original (figuras.widthPt/heightPt), reducido a la
+            // baja si excede el área útil de una página completa.
+            List<PDImageXObject> pdfImages = new ArrayList<>();
+            float[] sW = new float[figures.size()];
+            float[] sH = new float[figures.size()];
+            for (int i = 0; i < figures.size(); i++) {
+                FigureUnit fd = figures.get(i);
+                pdfImages.add(PDImageXObject.createFromByteArray(
+                        destDoc, fd.imageBytes, "figura_" + (i + 1)));
+                float w = fd.widthPt;
+                float h = fd.heightPt;
+                float scale = 1f;
+                if (w > usableW)            scale = Math.min(scale, usableW / w);
+                if (h * scale > usableH)    scale = Math.min(scale, usableH / h);
+                sW[i] = w * scale;
+                sH[i] = h * scale;
+            }
+
+            // ── Decidir si la primera figura cabe junto al encabezado ──
             PDPage currentPage = destDoc.getPage(destDoc.getNumberOfPages() - 1);
             float destY = bodyBottom + remainingY;
-            LOG.info("insertFiguresContinuous: destY inicial=" + destY
-                   + " (remainingY=" + remainingY + ")");
+            float firstBlockTotal = sectionTitleTopPad + sectionTitleH + sH[0];
+            boolean firstFitsAfterHeader = (destY - bodyBottom) >= firstBlockTotal;
 
-            // ── Pre-crear las imágenes PDFBox para layout ──
-            List<PDImageXObject> pdfImages = new ArrayList<>();
-            for (int i = 0; i < figures.size(); i++) {
-                pdfImages.add(PDImageXObject.createFromByteArray(
-                        destDoc, figures.get(i).imageBytes, "figura_" + (i + 1)));
-            }
-
-            // ── Título de sección "DIBUJOS" ──
-            float sectionTitleH = 22f;
-            if ((destY - bodyBottom) < sectionTitleH + 80f) {
+            if (firstFitsAfterHeader) {
+                destY -= sectionTitleTopPad;
+                LOG.info("insertFiguresContinuous: primera figura cabe junto al encabezado (remainingY="
+                       + remainingY + ", necesario=" + firstBlockTotal + ")");
+            } else {
+                // Nueva página: el título "DIBUJOS" queda a ~2 cm del top absoluto
+                // de la hoja, no sumado al margen superior.
                 currentPage = new PDPage(PDRectangle.A4);
                 destDoc.addPage(currentPage);
-                destY = bodyTop;
+                destY = pageH - sectionTitleTopPad;
+                LOG.info("insertFiguresContinuous: primera figura → página nueva, DIBUJOS a 2 cm del top");
             }
 
+            // ── Título "DIBUJOS" (antes de la primera figura) ──
             try (PDPageContentStream cs = new PDPageContentStream(
                     destDoc, currentPage, AppendMode.APPEND, true, true)) {
                 String secTitle = "DIBUJOS";
@@ -381,102 +470,98 @@ public class PdfProcessingService {
             }
             destY -= sectionTitleH;
 
-            // ── Colocar figuras: 1 col si ≤ 2 figuras, 2 cols si > 2 ──
-            int fi = 0;
-            int figNum = 1;
-            int colsPerRow = fewFigures ? 1 : 2;
-            while (fi < figures.size()) {
-                int rowCount = Math.min(colsPerRow, figures.size() - fi);
+            // ── Clamp defensivo: la primera figura debe caber entre destY y el margen inferior ──
+            float availFirst = destY - bodyBottom;
+            if (sH[0] > availFirst && availFirst > 50f) {
+                float fit = availFirst / sH[0];
+                sW[0] *= fit;
+                sH[0] = availFirst;
+                LOG.info("insertFiguresContinuous: primera figura reescalada a "
+                       + String.format("%.1fx%.1f", sW[0], sH[0]) + " pt para caber");
+            }
 
-                // Calcular tamaño escalado para cada figura de la fila
-                float rowImgH = 0;
-                float[] sW = new float[rowCount];
-                float[] sH = new float[rowCount];
-
-                for (int r = 0; r < rowCount; r++) {
-                    PDImageXObject img = pdfImages.get(fi + r);
-                    float iw = img.getWidth();
-                    float ih = img.getHeight();
-                    float scale = Math.min(cellW / iw, maxCellImgH / ih);
-                    if (scale > 1f) scale = 1f;
-                    sW[r] = iw * scale;
-                    sH[r] = ih * scale;
-                    rowImgH = Math.max(rowImgH, sH[r]);
-                }
-
-                float neededH = labelH + rowImgH + rowGap;
-                float available = destY - bodyBottom;
-
-                // Si no cabe, intentar reducir o ir a nueva página
-                if (available < labelH + 50f) {
+            // ── Una figura por página, sin etiqueta individual ──
+            // Primera figura: top-aligned debajo del título "DIBUJOS".
+            // Figuras 2..N: cada una centrada verticalmente en su propia hoja.
+            for (int i = 0; i < figures.size(); i++) {
+                float blockTop;
+                if (i == 0) {
+                    blockTop = destY;
+                } else {
                     currentPage = new PDPage(PDRectangle.A4);
                     destDoc.addPage(currentPage);
-                    destY = bodyTop;
-                    available = destY - bodyBottom;
+                    blockTop = bodyBottom + (usableH + sH[i]) / 2f;
                 }
 
-                if (neededH > available) {
-                    float maxH = available - labelH - rowGap;
-                    if (maxH < 50f) {
-                        currentPage = new PDPage(PDRectangle.A4);
-                        destDoc.addPage(currentPage);
-                        destY = bodyTop;
-                        available = destY - bodyBottom;
-                        maxH = available - labelH - rowGap;
-                    }
-                    for (int r = 0; r < rowCount; r++) {
-                        if (sH[r] > maxH) {
-                            float fitScale = maxH / sH[r];
-                            sW[r] *= fitScale;
-                            sH[r] = maxH;
-                        }
-                    }
-                    rowImgH = Math.min(rowImgH, maxH);
+                float imgX = marginL + (usableW - sW[i]) / 2f;
+                float imgY = blockTop - sH[i];
+
+                try (PDPageContentStream cs = new PDPageContentStream(
+                        destDoc, currentPage, AppendMode.APPEND, true, true)) {
+                    cs.drawImage(pdfImages.get(i), imgX, imgY, sW[i], sH[i]);
                 }
 
-                // Dibujar cada figura de la fila
-                for (int r = 0; r < rowCount; r++) {
-                    String label = "FIGURA " + figNum;
-                    FigureData fig = figures.get(fi + r);
-                    if (fig.label != null) label = fig.label;
-
-                    float colX;
-                    if (rowCount == 2) {
-                        colX = marginL + r * (cellW + colGap);
-                    } else {
-                        // Figura única: centrar en el ancho disponible
-                        colX = marginL + (usableW - cellW) / 2f;
-                    }
-
-                    float lblX = colX + (cellW - estimateTextWidth(label, 10f)) / 2f;
-                    float lblY = destY - labelH + 2f;
-                    float imgX = colX + (cellW - sW[r]) / 2f;
-                    float imgY = destY - labelH - sH[r];
-
-                    try (PDPageContentStream cs = new PDPageContentStream(
-                            destDoc, currentPage, AppendMode.APPEND, true, true)) {
-                        // Etiqueta centrada
-                        cs.beginText();
-                        cs.setFont(PDType1Font.HELVETICA_BOLD, 10f);
-                        cs.setNonStrokingColor(0, 0, 0);
-                        cs.newLineAtOffset(lblX, lblY);
-                        cs.showText(sanitizeText(label));
-                        cs.endText();
-                        // Imagen
-                        cs.drawImage(pdfImages.get(fi + r), imgX, imgY, sW[r], sH[r]);
-                    }
-                    figNum++;
-                }
-
-                destY -= (labelH + rowImgH + rowGap);
-                fi += rowCount;
-
-                LOG.info("insertFiguresContinuous: fila colocada (" + rowCount
-                       + " figuras), destY=" + destY);
+                LOG.info("insertFiguresContinuous: figura " + (i + 1) + " colocada ("
+                       + String.format("%.1fx%.1f", sW[i], sH[i]) + " pt)");
             }
 
             destDoc.save(destPdf);
         }
+    }
+
+    /**
+     * Extracción simple para Diseños Industriales: cada página del PDF es UNA
+     * unidad visual. Renderiza la página, recorta márgenes blancos y la
+     * devuelve como FigureUnit. No separa figuras dentro de una página
+     * (preserva, por ejemplo, una página con varias vistas de la misma pieza).
+     *
+     * DPI variable: se ajusta para que la imagen renderizada no exceda
+     * {@code TARGET_MAX_PX} en su lado largo, manteniendo un tamaño de
+     * archivo razonable incluso para PDFs de gran formato (ej. 875×1237 mm).
+     * Las dimensiones físicas en pt se calculan a partir del tamaño real
+     * de la página (no del DPI), así el escalado posterior es correcto.
+     */
+    private List<FigureUnit> extractFigureImagesByPage(PDDocument doc) throws Exception {
+        final int TARGET_MAX_PX = 2400;   // ~A4 a 200 DPI
+        final float MAX_DPI = 200f;
+        List<FigureUnit> figures = new ArrayList<>();
+        PDFRenderer renderer = new PDFRenderer(doc);
+        int n = doc.getNumberOfPages();
+        for (int p = 0; p < n; p++) {
+            PDPage page = doc.getPage(p);
+            float pageWPt = page.getMediaBox().getWidth();
+            float pageHPt = page.getMediaBox().getHeight();
+            float longSidePt = Math.max(pageWPt, pageHPt);
+            float dpi = Math.min(MAX_DPI, TARGET_MAX_PX * 72f / longSidePt);
+
+            java.awt.image.BufferedImage pageImg =
+                    renderer.renderImageWithDPI(p, dpi, ImageType.RGB);
+            if (pageImg.getWidth() < 50 || pageImg.getHeight() < 50) continue;
+
+            int fullW = pageImg.getWidth();
+            int fullH = pageImg.getHeight();
+            java.awt.image.BufferedImage cropped = autoCropWhiteMargins(pageImg, 8);
+            if (cropped.getWidth() < 80 || cropped.getHeight() < 60) continue;
+
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(cropped, "png", baos);
+            byte[] data = baos.toByteArray();
+
+            if (data.length > 1024) {
+                // Dimensiones físicas: ratio del crop respecto al render completo
+                // multiplicado por el tamaño físico real de la página fuente.
+                float widthPt  = (float) cropped.getWidth()  / fullW * pageWPt;
+                float heightPt = (float) cropped.getHeight() / fullH * pageHPt;
+                figures.add(new FigureUnit(data, widthPt, heightPt));
+                LOG.info("extractFigureImagesByPage: pág " + (p + 1)
+                       + " → unidad (" + cropped.getWidth() + "x" + cropped.getHeight()
+                       + " px @ " + String.format("%.0f", dpi) + " dpi → "
+                       + String.format("%.1fx%.1f", widthPt, heightPt) + " pt, "
+                       + (data.length / 1024) + " KB)");
+            }
+        }
+        LOG.info("extractFigureImagesByPage: total unidades = " + figures.size());
+        return figures;
     }
 
     /**
@@ -648,10 +733,14 @@ public class PdfProcessingService {
                     FigureData fd = new FigureData();
                     fd.imageBytes = data;
                     fd.label = null;
+                    // Conversión 200 DPI → pt: pt = px * 72 / 200
+                    fd.widthPt  = regionImg.getWidth()  * 72f / 200f;
+                    fd.heightPt = regionImg.getHeight() * 72f / 200f;
                     figures.add(fd);
                     LOG.info("extractFigureImages: pág " + (p + 1)
                            + " → figura (" + regionImg.getWidth()
-                           + "x" + regionImg.getHeight() + ")");
+                           + "x" + regionImg.getHeight() + " px, "
+                           + String.format("%.1fx%.1f", fd.widthPt, fd.heightPt) + " pt)");
                 }
             }
         }
@@ -1217,6 +1306,8 @@ public class PdfProcessingService {
     private static class FigureData {
         byte[] imageBytes;
         String label;
+        float widthPt;   // dimensión física original (renderizado a 200 DPI → pt)
+        float heightPt;
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -1392,6 +1483,30 @@ public class PdfProcessingService {
             List<File> reivFiles,
             List<File> dibFiles,
             File tempDir) throws Exception {
+        return processPatentBatchFromDB(dataList, reivFiles, dibFiles, null, tempDir);
+    }
+
+    /**
+     * Portadas (PDFs) que se insertan al inicio de cada sección del lote.
+     * Cualquiera puede ser null si no se desea portada para esa sección.
+     */
+    public static class SectionCovers {
+        public File invencion;   // Patentes de Invención y PCT
+        public File modelos;     // Modelos de Utilidad
+        public File disenios;    // Diseños Industriales
+    }
+
+    /**
+     * Igual que {@link #processPatentBatchFromDB(List, List, List, File)} pero
+     * inserta una portada de sección antes del primer trámite de cada grupo.
+     * Asume que {@code dataList} ya viene ordenada por sección.
+     */
+    public File processPatentBatchFromDB(
+            List<PatentData> dataList,
+            List<File> reivFiles,
+            List<File> dibFiles,
+            SectionCovers covers,
+            File tempDir) throws Exception {
 
         ensureDir(tempDir);
 
@@ -1399,40 +1514,83 @@ public class PdfProcessingService {
             throw new IllegalArgumentException("La lista de patentes está vacía.");
         }
 
-        // Pre-extraer figuras de los Diseños Industriales (mismo flujo que individual)
-        List<List<byte[]>> figureImagesList = new ArrayList<>();
+        // ── Estrategia: generar cada patente con processPatentFromDB
+        // (mismo flujo que "Generar PDF Individual") y luego fusionar los
+        // resultados con PDFMergerUtility. Esto garantiza paridad funcional
+        // entre individual y lote sin duplicar la lógica de claims/dibujos.
+        // Como cada PDF individual termina en su propia hoja, al fusionarse
+        // cada patente del lote arranca automáticamente en una hoja nueva.
+        List<File> individualPdfs = new ArrayList<>();
+        String seccionAnterior = null;
         for (int i = 0; i < dataList.size(); i++) {
             PatentData pd = dataList.get(i);
-            File dibFile = (dibFiles != null && i < dibFiles.size()) ? dibFiles.get(i) : null;
-            List<byte[]> figBytes = new ArrayList<>();
-            if (pd.isDisenoIndustrial() && dibFile != null && dibFile.exists()) {
-                try (PDDocument doc = PDDocument.load(dibFile)) {
-                    List<FigureData> figs = extractFigureImages(doc);
-                    for (FigureData fd : figs) {
-                        figBytes.add(fd.imageBytes);
-                    }
-                    LOG.info("processPatentBatchFromDB: DI " + pd.getApplicationNumber()
-                           + " → " + figs.size() + " figuras extraídas");
-                } catch (Exception e) {
-                    LOG.warning("processPatentBatchFromDB: error extrayendo figuras de "
-                              + pd.getApplicationNumber() + ": " + e.getMessage());
+            File reivFile = (reivFiles != null && i < reivFiles.size()) ? reivFiles.get(i) : null;
+            File dibFile  = (dibFiles  != null && i < dibFiles.size())  ? dibFiles.get(i)  : null;
+
+            // ── Portada de sección al cambiar de grupo ──
+            String seccion = seccionDe(pd);
+            if (!seccion.equals(seccionAnterior)) {
+                File portada = portadaDeSeccion(covers, seccion);
+                if (portada != null && portada.exists()) {
+                    individualPdfs.add(portada);
                 }
+                seccionAnterior = seccion;
             }
-            figureImagesList.add(figBytes);
+
+            File patentDir = new File(tempDir, "patent_" + (i + 1));
+            ensureDir(patentDir);
+            try {
+                File individual = processPatentFromDB(pd, reivFile, dibFile, patentDir);
+                // Renombrar para que no colisione al iterar
+                File renamed = new File(patentDir, "INDIVIDUAL_" + (i + 1) + ".pdf");
+                java.nio.file.Files.move(individual.toPath(), renamed.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                individualPdfs.add(renamed);
+                LOG.info("processPatentBatchFromDB: " + pd.getApplicationNumber()
+                       + " → " + renamed.length() + " bytes");
+            } catch (Exception e) {
+                LOG.warning("processPatentBatchFromDB: error generando PDF individual de "
+                          + pd.getApplicationNumber() + ": " + e.getMessage());
+            }
         }
 
         File outputPdf = new File(tempDir, "LOTE_FINAL.pdf");
-
-        BatchPatentPdfComposer composer = new BatchPatentPdfComposer();
-        byte[] bannerImg = findSeparatorImageBytes();
-        if (bannerImg != null) {
-            composer.setSeparatorImageBytes(bannerImg);
+        if (individualPdfs.isEmpty()) {
+            throw new IllegalStateException("No se pudo generar ningún PDF individual del lote.");
         }
-        composer.composeBatch(dataList, reivFiles, dibFiles, figureImagesList, outputPdf, tempDir);
+        merge(outputPdf, individualPdfs.toArray(new File[0]));
 
-        LOG.info("processPatentBatchFromDB: lote generado → "
-               + outputPdf.length() + " bytes, " + dataList.size() + " patentes");
+        LOG.info("processPatentBatchFromDB: lote fusionado → "
+               + outputPdf.length() + " bytes, " + individualPdfs.size() + "/" + dataList.size() + " patentes");
         return outputPdf;
+    }
+
+    /**
+     * Sección de lote a la que pertenece una patente:
+     *   "INVENCION" → Patentes de Invención y PCT
+     *   "MODELOS"   → Modelos de Utilidad
+     *   "DISENIOS"  → Diseños Industriales
+     */
+    private String seccionDe(PatentData pd) {
+        if (pd.isDisenoIndustrial()) {
+            return "DISENIOS";
+        }
+        if (pd.isModeloUtilidad()) {
+            return "MODELOS";
+        }
+        return "INVENCION"; // PI, PCT y desconocidos
+    }
+
+    /** Devuelve la portada configurada para una sección (puede ser null). */
+    private File portadaDeSeccion(SectionCovers covers, String seccion) {
+        if (covers == null) {
+            return null;
+        }
+        switch (seccion) {
+            case "DISENIOS": return covers.disenios;
+            case "MODELOS":  return covers.modelos;
+            default:         return covers.invencion;
+        }
     }
 
     /**
@@ -1450,38 +1608,38 @@ public class PdfProcessingService {
             throw new IllegalArgumentException("La lista de diseños está vacía.");
         }
 
-        // Pre-extraer figuras de cada PDF de dibujos
-        List<List<byte[]>> allFigureImages = new ArrayList<>();
+        // ── Estrategia: generar cada diseño con processPatentFromDB
+        // (que internamente detecta DI y usa insertFiguresContinuous) y luego
+        // fusionar con PDFMergerUtility. Mismo enfoque que processPatentBatchFromDB.
+        List<File> individualPdfs = new ArrayList<>();
         for (int i = 0; i < dataList.size(); i++) {
+            PatentData pd = dataList.get(i);
             File dibFile = (dibFiles != null && i < dibFiles.size()) ? dibFiles.get(i) : null;
-            List<byte[]> figBytes = new ArrayList<>();
-            if (dibFile != null && dibFile.exists()) {
-                try (PDDocument doc = PDDocument.load(dibFile)) {
-                    List<FigureData> figs = extractFigureImages(doc);
-                    for (FigureData fd : figs) {
-                        figBytes.add(fd.imageBytes);
-                    }
-                    LOG.info("processDesignBatchFromDB: diseño " + (i + 1)
-                           + " → " + figs.size() + " figuras extraídas");
-                } catch (Exception e) {
-                    LOG.warning("processDesignBatchFromDB: error extrayendo figuras del diseño "
-                              + (i + 1) + ": " + e.getMessage());
-                }
+
+            File patentDir = new File(tempDir, "design_" + (i + 1));
+            ensureDir(patentDir);
+            try {
+                File individual = processPatentFromDB(pd, null, dibFile, patentDir);
+                File renamed = new File(patentDir, "INDIVIDUAL_" + (i + 1) + ".pdf");
+                java.nio.file.Files.move(individual.toPath(), renamed.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                individualPdfs.add(renamed);
+                LOG.info("processDesignBatchFromDB: diseño " + (i + 1)
+                       + " → " + renamed.length() + " bytes");
+            } catch (Exception e) {
+                LOG.warning("processDesignBatchFromDB: error generando PDF individual del diseño "
+                          + (i + 1) + ": " + e.getMessage());
             }
-            allFigureImages.add(figBytes);
         }
 
         File outputPdf = new File(tempDir, "LOTE_DISENOS_FINAL.pdf");
-
-        BatchPatentPdfComposer composer = new BatchPatentPdfComposer();
-        byte[] bannerImg = findSeparatorImageBytes();
-        if (bannerImg != null) {
-            composer.setSeparatorImageBytes(bannerImg);
+        if (individualPdfs.isEmpty()) {
+            throw new IllegalStateException("No se pudo generar ningún PDF individual del lote de diseños.");
         }
-        composer.composeDesignBatch(dataList, allFigureImages, outputPdf, tempDir);
+        merge(outputPdf, individualPdfs.toArray(new File[0]));
 
-        LOG.info("processDesignBatchFromDB: lote generado → "
-               + outputPdf.length() + " bytes, " + dataList.size() + " diseños");
+        LOG.info("processDesignBatchFromDB: lote fusionado → "
+               + outputPdf.length() + " bytes, " + individualPdfs.size() + "/" + dataList.size() + " diseños");
         return outputPdf;
     }
 
@@ -1516,6 +1674,7 @@ public class PdfProcessingService {
             throw new IllegalStateException("No se pudo crear la carpeta temporal.");
         }
     }
+
 
     private void merge(File output, File... sources) throws Exception {
         PDFMergerUtility merger = new PDFMergerUtility();

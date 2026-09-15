@@ -24,8 +24,11 @@ import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.pdmodel.font.PDFont;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 
 /**
  * Fragmenta el content stream de una página PDF filtrando por rango Y.
@@ -211,6 +214,158 @@ public class ContentStreamFragmenter {
     }
 
     /**
+     * Calcula el rango Y real ocupado por un XObject ya posicionado por el CTM.
+     *
+     * Para PDImageXObject (raster), el espacio local es [0,0,1,1] → alto = |ctmD|.
+     * Para PDFormXObject (fórmulas químicas/matemáticas tipo ChemDraw/MathJax),
+     * el espacio local lo define el BBox del Form, que puede ser arbitrario.
+     *
+     * Sin esta corrección, el rango calculado solo refleja el factor de escala
+     * y no el alto real del contenido del Form (causa de fórmulas recortadas).
+     */
+    private static float[] xobjectYRange(
+            PDPage page, COSName xobjName,
+            float ctmD, float ctmF) {
+
+        float bboxBottom = 0f;
+        float bboxTop    = 1f;
+
+        if (xobjName != null && page.getResources() != null) {
+            try {
+                PDXObject xobj = page.getResources().getXObject(xobjName);
+                if (xobj instanceof PDFormXObject) {
+                    PDRectangle bbox = ((PDFormXObject) xobj).getBBox();
+                    if (bbox != null) {
+                        bboxBottom = bbox.getLowerLeftY();
+                        bboxTop    = bbox.getUpperRightY();
+                    }
+                }
+                // Para PDImageXObject: dimensiones intrínsecas normalizadas → [0,1]
+            } catch (IOException ignored) {
+                // Si no se puede leer el XObject, asumir espacio unitario
+            }
+        }
+
+        float y0 = ctmF + bboxBottom * ctmD;
+        float y1 = ctmF + bboxTop    * ctmD;
+        return new float[]{ Math.min(y0, y1), Math.max(y0, y1) };
+    }
+
+    /**
+     * Calcula el rango Y efectivo (en coordenadas de página) que aporta un operador
+     * de path-building. Devuelve {@code [minY, maxY]} o {@code null} si el operador
+     * no contribuye Y (como {@code h}).
+     *
+     * Aplica el componente Y del CTM actual: {@code effY = ctmD * rawY + ctmF}.
+     */
+    private static float[] pathOpYRange(
+            String name, List<Object> operands, float ctmD, float ctmF) {
+
+        if ("m".equals(name) || "l".equals(name)) {
+            if (operands.size() >= 2) {
+                float y = ctmD * toFloat(operands.get(operands.size() - 1)) + ctmF;
+                return new float[]{ y, y };
+            }
+        } else if ("c".equals(name) && operands.size() >= 6) {
+            float y1 = ctmD * toFloat(operands.get(operands.size() - 5)) + ctmF;
+            float y2 = ctmD * toFloat(operands.get(operands.size() - 3)) + ctmF;
+            float y3 = ctmD * toFloat(operands.get(operands.size() - 1)) + ctmF;
+            float lo = Math.min(y1, Math.min(y2, y3));
+            float hi = Math.max(y1, Math.max(y2, y3));
+            return new float[]{ lo, hi };
+        } else if (("v".equals(name) || "y".equals(name)) && operands.size() >= 4) {
+            float y2 = ctmD * toFloat(operands.get(operands.size() - 3)) + ctmF;
+            float y3 = ctmD * toFloat(operands.get(operands.size() - 1)) + ctmF;
+            return new float[]{ Math.min(y2, y3), Math.max(y2, y3) };
+        } else if ("re".equals(name) && operands.size() >= 4) {
+            float y = toFloat(operands.get(operands.size() - 3));
+            float h = toFloat(operands.get(operands.size() - 1));
+            float effY1 = ctmD * y + ctmF;
+            float effY2 = ctmD * (y + h) + ctmF;
+            return new float[]{ Math.min(effY1, effY2), Math.max(effY1, effY2) };
+        }
+        // h no aporta nuevos vértices (solo cierra)
+        return null;
+    }
+
+    /**
+     * Devuelve el último COSName en la lista (típicamente el nombre del XObject
+     * referenciado por el operador siguiente como /XObjName Do).
+     */
+    private static COSName lastCOSName(List<Object> tokens) {
+        for (int i = tokens.size() - 1; i >= 0; i--) {
+            if (tokens.get(i) instanceof COSName) return (COSName) tokens.get(i);
+        }
+        return null;
+    }
+
+    /**
+     * Detecta los rangos Y ocupados por XObjects (operadores {@code Do}) en una página,
+     * filtrando los que se solapan con {@code [yMin, yMax]}.
+     *
+     * Útil para evitar que el fragmentador corte una fórmula/imagen a la mitad
+     * cuando reparte el rango Y en sub-fragmentos de páginas distintas.
+     *
+     * @return lista de {@code [imgYBottom, imgYTop]} (coords PDF) por cada XObject relevante,
+     *         ordenada de mayor Y a menor Y (top → bottom).
+     */
+    public static List<float[]> extractXObjectYRanges(
+            PDPage page, float yMin, float yMax) throws IOException {
+
+        PDFStreamParser parser = new PDFStreamParser(page);
+        parser.parse();
+        List<Object> allTokens = parser.getTokens();
+
+        List<float[]> ranges = new ArrayList<>();
+        float ctmA = 1f, ctmD = 1f, ctmE = 0f, ctmF = 0f;
+        java.util.ArrayDeque<float[]> ctmStack = new java.util.ArrayDeque<>();
+        List<Object> pendingOperands = new ArrayList<>();
+
+        for (int i = 0; i < allTokens.size(); i++) {
+            Object token = allTokens.get(i);
+            if (!(token instanceof Operator)) {
+                pendingOperands.add(token);
+                continue;
+            }
+            String name = ((Operator) token).getName();
+
+            if ("q".equals(name)) {
+                ctmStack.push(new float[]{ctmA, ctmD, ctmE, ctmF});
+            } else if ("Q".equals(name)) {
+                if (!ctmStack.isEmpty()) {
+                    float[] prev = ctmStack.pop();
+                    ctmA = prev[0]; ctmD = prev[1]; ctmE = prev[2]; ctmF = prev[3];
+                }
+            } else if ("cm".equals(name) && pendingOperands.size() >= 6) {
+                float cmA = toFloat(pendingOperands.get(pendingOperands.size() - 6));
+                float cmD = toFloat(pendingOperands.get(pendingOperands.size() - 3));
+                float cmE = toFloat(pendingOperands.get(pendingOperands.size() - 2));
+                float cmF = toFloat(pendingOperands.get(pendingOperands.size() - 1));
+                float newA = ctmA * cmA;
+                float newE = ctmA * cmE + ctmE;
+                float newD = ctmD * cmD;
+                float newF = ctmD * cmF + ctmF;
+                ctmA = newA; ctmD = newD; ctmE = newE; ctmF = newF;
+            } else if ("Do".equals(name)) {
+                // Rango Y real considerando el BBox del Form XObject (si aplica).
+                COSName xobjName = lastCOSName(pendingOperands);
+                float[] yr = xobjectYRange(page, xobjName, ctmD, ctmF);
+                if (yr[1] > yMin && yr[0] < yMax) {
+                    ranges.add(yr);
+                    LOG.info("extractXObjectYRanges: Do " + xobjName + " Y=["
+                           + yr[0] + ", " + yr[1] + "] alto=" + (yr[1] - yr[0])
+                           + " (ctmF=" + ctmF + " ctmD=" + ctmD + ")");
+                }
+            }
+            pendingOperands.clear();
+        }
+
+        // Ordenar de mayor Y a menor Y (top → bottom)
+        ranges.sort((a, b) -> Float.compare(b[1], a[1]));
+        return ranges;
+    }
+
+    /**
      * Extrae del content stream de una página solo el contenido cuyo
      * posición Y cae dentro del rango [yBottom, yTop] (coordenadas PDF, Y desde abajo).
      *
@@ -252,6 +407,12 @@ public class ContentStreamFragmenter {
         // Rastrear el área máxima de rectángulos en el path actual
         float maxRectArea = 0f;
         boolean hasRect = false;
+
+        // ── Tracking del path actual para filtrar paths fuera del rango Y ──
+        // (líneas/strokes/rectángulos en headers/footers del PDF fuente)
+        List<Object> pendingPath = new ArrayList<>();
+        float pathMinY = Float.POSITIVE_INFINITY;
+        float pathMaxY = Float.NEGATIVE_INFINITY;
 
         int i = 0;
         while (i < allTokens.size()) {
@@ -321,72 +482,94 @@ public class ContentStreamFragmenter {
                     ctmA = newA; ctmD = newD; ctmE = newE; ctmF = newF;
                 }
 
-                // Rastrear rectángulos para detectar fondos de página completa
-                if ("re".equals(name) && pendingOperands.size() >= 4) {
-                    float w = Math.abs(toFloat(pendingOperands.get(pendingOperands.size() - 2)));
-                    float h = Math.abs(toFloat(pendingOperands.get(pendingOperands.size() - 1)));
-                    float area = w * h;
-                    if (area > maxRectArea) maxRectArea = area;
-                    hasRect = true;
+                // ── Path-building: acumular en pendingPath con tracking de Y ──
+                boolean isPathBuild = "m".equals(name) || "l".equals(name)
+                        || "c".equals(name) || "v".equals(name) || "y".equals(name)
+                        || "h".equals(name) || "re".equals(name);
+                if (isPathBuild) {
+                    float[] yRange = pathOpYRange(name, pendingOperands, ctmD, ctmF);
+                    if (yRange != null) {
+                        if (yRange[0] < pathMinY) pathMinY = yRange[0];
+                        if (yRange[1] > pathMaxY) pathMaxY = yRange[1];
+                    }
+                    if ("re".equals(name) && pendingOperands.size() >= 4) {
+                        float w = Math.abs(toFloat(pendingOperands.get(pendingOperands.size() - 2)));
+                        float h = Math.abs(toFloat(pendingOperands.get(pendingOperands.size() - 1)));
+                        float area = w * h;
+                        if (area > maxRectArea) maxRectArea = area;
+                        hasRect = true;
+                    }
+                    pendingPath.addAll(pendingOperands);
+                    pendingPath.add(token);
+                    pendingOperands.clear();
+                    i++;
+                    continue;
                 }
 
-                // Filtrar fills de rectángulos de página completa (fondos blancos)
-                if (("f".equals(name) || "f*".equals(name) || "F".equals(name)) && hasRect) {
-                    boolean isFullPageFill = pageArea > 0 && (maxRectArea / pageArea) > 0.5f;
-                    if (isFullPageFill) {
-                        // Descartar: no emitir los operandos del re ni el f
-                        // Reemplazar con 'n' (end path sin dibujar) para mantener
-                        // el estado del path limpio
+                // ── Paint y clipping ──
+                boolean isFill   = "f".equals(name) || "f*".equals(name) || "F".equals(name);
+                boolean isStroke = "S".equals(name) || "s".equals(name);
+                boolean isBoth   = "b".equals(name) || "b*".equals(name)
+                                  || "B".equals(name) || "B*".equals(name);
+                boolean isEnd    = "n".equals(name);
+                boolean isClip   = "W".equals(name) || "W*".equals(name);
+
+                if (isFill || isStroke || isBoth || isEnd || isClip) {
+                    boolean isFullPage = hasRect && pageArea > 0
+                                       && (maxRectArea / pageArea) > 0.5f;
+                    boolean entirelyOutside = pathMaxY < yBottom || pathMinY > yTop;
+
+                    if (isClip) {
+                        // Clipping path: emitir siempre (un clip fuera de rango
+                        // simplemente recorta más, nunca añade contenido visible).
+                        result.addAll(pendingPath);
+                        result.addAll(pendingOperands);
+                        result.add(token);
+                    } else if (isEnd) {
+                        // n = terminar path sin pintar: descartar el path acumulado
+                        result.add(token);
+                    } else if (isFullPage && isFill) {
+                        // Fondo blanco de página completa: reemplazar por 'n'
                         result.add(Operator.getOperator("n"));
-                        pendingOperands.clear();
-                        hasRect = false;
-                        maxRectArea = 0f;
-                        i++;
-                        continue;
+                    } else if (isFullPage && isBoth) {
+                        // fill+stroke de página completa: dejar solo stroke
+                        String strokeOnly = ("b".equals(name) || "b*".equals(name)) ? "s" : "S";
+                        result.addAll(pendingPath);
+                        result.add(Operator.getOperator(strokeOnly));
+                    } else if (entirelyOutside) {
+                        // Path completamente fuera del rango Y: descartar
+                        // (típicamente líneas/strokes del header/footer del fuente)
+                    } else {
+                        // Path en rango: emitir tal cual
+                        result.addAll(pendingPath);
+                        result.addAll(pendingOperands);
+                        result.add(token);
                     }
-                    hasRect = false;
-                    maxRectArea = 0f;
-                }
 
-                // Resetear tracking de path al terminar
-                if ("S".equals(name) || "s".equals(name) || "n".equals(name)
-                        || "W".equals(name) || "W*".equals(name)
-                        || "b".equals(name) || "b*".equals(name)
-                        || "B".equals(name) || "B*".equals(name)) {
-                    // Para b/B también chequear si es fondo de página
-                    if (("b".equals(name) || "b*".equals(name)
-                            || "B".equals(name) || "B*".equals(name)) && hasRect) {
-                        boolean isFullPage = pageArea > 0 && (maxRectArea / pageArea) > 0.5f;
-                        if (isFullPage) {
-                            // Convertir fill+stroke en solo stroke
-                            String strokeOnly = ("b".equals(name) || "b*".equals(name)) ? "s" : "S";
-                            result.addAll(pendingOperands);
-                            result.add(Operator.getOperator(strokeOnly));
-                            pendingOperands.clear();
-                            hasRect = false;
-                            maxRectArea = 0f;
-                            i++;
-                            continue;
-                        }
-                    }
+                    pendingPath.clear();
+                    pendingOperands.clear();
+                    pathMinY = Float.POSITIVE_INFINITY;
+                    pathMaxY = Float.NEGATIVE_INFINITY;
                     hasRect = false;
                     maxRectArea = 0f;
+                    i++;
+                    continue;
                 }
 
                 if ("Do".equals(name)) {
-                    // Usar CTM para convertir gfxY a coordenadas efectivas PDF
-                    float effectiveGfxY = ctmD * ctmF + ctmF; // La posición Y del Do en espacio de página
-                    // Para Do, la posición Y viene del CTM f component directamente
-                    boolean inRange = ctmF > yBottom && ctmF <= yTop;
+                    // Rango Y real considerando el BBox del Form XObject (si aplica).
+                    // Sin BBox correcto, fórmulas químicas (Form XObject con BBox no-unitario)
+                    // se calculaban como de altura |ctmD| pt y el clip recortaba el cuerpo.
+                    COSName xobjName = lastCOSName(pendingOperands);
+                    float[] yr = xobjectYRange(page, xobjName, ctmD, ctmF);
+                    float imgYBottom = yr[0];
+                    float imgYTop    = yr[1];
+                    boolean inRange = imgYTop > yBottom && imgYBottom < yTop;
                     if (inRange) {
                         result.addAll(pendingOperands);
                         result.add(token);
-                        if (ctmF < minContentY) {
-                            minContentY = ctmF;
-                        }
-                        if (ctmF > maxContentY) {
-                            maxContentY = ctmF;
-                        }
+                        if (imgYBottom < minContentY) minContentY = imgYBottom;
+                        if (imgYTop    > maxContentY) maxContentY = imgYTop;
                     }
                 } else {
                     // Operadores de estado: preservar siempre
@@ -596,6 +779,12 @@ public class ContentStreamFragmenter {
         // Se usa para el chequeo de rango en vez de textY.
         float baselineY = 0;
         float textX = 0; // Posición X para detectar números de línea del margen
+        // Text matrix Y-scale (componente d). Cuando el PDF usa Tm con flip
+        // vertical (1 0 0 -1 e f), tlmD=-1 y los desplazamientos Td/TD/T*
+        // se invierten en su sentido respecto al espacio del CTM externo.
+        // Sin este tracking, Google Docs (que usa este patrón) hacía que
+        // mi cursor Y quedara en un valor sin relación con la posición real.
+        float tlmD = 1f;
         // Umbral: desplazamientos Y menores a esto se consideran sub/superíndice
         float SUB_THRESHOLD = 8f;
         // Números de línea del margen izquierdo están a X < 80
@@ -615,6 +804,7 @@ public class ContentStreamFragmenter {
             switch (name) {
                 case "Tm":
                     if (operands.size() >= 6) {
+                        tlmD  = toFloat(operands.get(operands.size() - 3)); // d
                         textY = toFloat(operands.get(operands.size() - 1)); // f
                         textX = toFloat(operands.get(operands.size() - 2)); // e
                         lineY = textY;
@@ -624,10 +814,11 @@ public class ContentStreamFragmenter {
                 case "Td":
                     if (operands.size() >= 2) {
                         float ty = toFloat(operands.get(operands.size() - 1));
+                        float adj = tlmD * ty;
                         textX += toFloat(operands.get(operands.size() - 2));
-                        lineY += ty;
+                        lineY += adj;
                         textY = lineY;
-                        if (Math.abs(ty) >= SUB_THRESHOLD) {
+                        if (Math.abs(adj) >= SUB_THRESHOLD) {
                             baselineY = lineY; // Salto grande = nueva línea
                         }
                         // Salto pequeño = subíndice/superíndice, baselineY no cambia
@@ -636,11 +827,12 @@ public class ContentStreamFragmenter {
                 case "TD":
                     if (operands.size() >= 2) {
                         float ty = toFloat(operands.get(operands.size() - 1));
+                        float adj = tlmD * ty;
                         textX += toFloat(operands.get(operands.size() - 2));
-                        lineY += ty;
+                        lineY += adj;
                         textY = lineY;
                         leading = -ty;
-                        if (Math.abs(ty) >= SUB_THRESHOLD) {
+                        if (Math.abs(adj) >= SUB_THRESHOLD) {
                             baselineY = lineY;
                         }
                     }
@@ -651,7 +843,7 @@ public class ContentStreamFragmenter {
                     }
                     break;
                 case "T*":
-                    lineY -= leading;
+                    lineY -= leading * tlmD;
                     textY = lineY;
                     baselineY = lineY; // T* = salto de línea explícito
                     break;
@@ -669,11 +861,11 @@ public class ContentStreamFragmenter {
 
             // Actualizar cursor para operadores compuestos (antes de decidir)
             if ("'".equals(name)) {
-                lineY -= leading;
+                lineY -= leading * tlmD;
                 textY = lineY;
                 baselineY = lineY; // ' = nueva línea + mostrar
             } else if ("\"".equals(name)) {
-                lineY -= leading;
+                lineY -= leading * tlmD;
                 textY = lineY;
                 baselineY = lineY; // " = nueva línea + mostrar
             }
@@ -692,26 +884,18 @@ public class ContentStreamFragmenter {
                 float effectiveX = ctmA * textX + ctmE;
 
                 if (inRange) {
-                    // Detectar y eliminar números de página: texto puramente
-                    // numérico y centrado horizontalmente (X entre 200-400).
-                    // NO afecta números de línea (X < 80) ni texto del cuerpo.
-                    if (isPageNumber(operands, name, effectiveX)) {
-                        // No emitir — borrar el número de página
-                    } else {
-                        fb.hasVisibleText = true;
-                        // Solo contar texto del área principal para bounds
-                        // (excluir números de línea del margen izquierdo X < 80)
-                        if (effectiveX >= MARGIN_X) {
-                            if (effectiveY < fb.minTextY) {
-                                fb.minTextY = effectiveY;
-                            }
-                            if (effectiveY > fb.maxTextY) {
-                                fb.maxTextY = effectiveY;
-                            }
-                        }
-                        fb.tokens.addAll(operands);
-                        fb.tokens.add(token);
+                    // Los números de página los gestiona el detector de header/footer
+                    // a nivel macro (detectHeaderFooterBands). Aquí no descartamos
+                    // texto numérico para no perder subíndices como "CF3", "R12".
+                    fb.hasVisibleText = true;
+                    // Solo contar texto del área principal para bounds
+                    // (excluir números de línea del margen izquierdo X < 80)
+                    if (effectiveX >= MARGIN_X) {
+                        if (effectiveY < fb.minTextY) fb.minTextY = effectiveY;
+                        if (effectiveY > fb.maxTextY) fb.maxTextY = effectiveY;
                     }
+                    fb.tokens.addAll(operands);
+                    fb.tokens.add(token);
                 } else {
                     // Fuera de rango: no mostrar texto pero mantener cursor
                     if ("'".equals(name)) {
@@ -754,22 +938,6 @@ public class ContentStreamFragmenter {
     /** Convierte un COSNumber a float, 0 si no es número. */
     private static float toFloat(Object o) {
         return (o instanceof COSNumber) ? ((COSNumber) o).floatValue() : 0f;
-    }
-
-    /**
-     * Detecta si los operandos de un operador show-text representan un número
-     * de página: texto puramente numérico de 1–3 dígitos Y centrado
-     * horizontalmente (X entre 200–400pt), lo que lo distingue de números de
-     * línea del margen (X < 80) y de números dentro del texto del cuerpo.
-     */
-    private static boolean isPageNumber(List<Object> operands, String opName, float textX) {
-        // Solo considerar texto centrado horizontalmente (zona de número de página)
-        if (textX < 200f || textX > 400f) return false;
-        String text = extractShowText(operands, opName);
-        if (text == null) return false;
-        String trimmed = text.trim();
-        if (trimmed.isEmpty()) return false;
-        return trimmed.matches("\\d{1,3}");
     }
 
     /**

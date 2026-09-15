@@ -479,7 +479,7 @@ public class DatabaseSearchService {
             String formType = pair[0];
             String tableName = pair[1];
             String sqlFb = "SELECT id, application_number, status FROM " + tableName
-                    + " WHERE application_number = ?";
+                    + " WHERE application_number = ? and status = 'DELIVERED'";
             try (PreparedStatement ps = conn.prepareStatement(sqlFb)) {
                 ps.setString(1, code);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -529,6 +529,7 @@ public class DatabaseSearchService {
             String tableName = pair[1];
 
             String checkSql = "SELECT id FROM " + tableName + " WHERE id = ?";
+            System.out.println("============> "+checkSql +" <================");
             try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
                 ps.setInt(1, formId);
                 try (ResultSet rs = ps.executeQuery()) {

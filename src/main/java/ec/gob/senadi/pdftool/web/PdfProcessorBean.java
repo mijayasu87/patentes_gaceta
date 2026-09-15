@@ -509,7 +509,7 @@ public class PdfProcessorBean implements Serializable {
             resultadosBusqueda = dbService.search(code);
 
             if (resultadosBusqueda.isEmpty()) {
-                mensajeBusqueda = "No se encontraron trámites para: " + code;
+                mensajeBusqueda = "No se encontró con proceso iniciado el trámite: " + code;
                 fc.addMessage("searchMessages", new FacesMessage(FacesMessage.SEVERITY_WARN,
                         "Sin resultados", mensajeBusqueda));
             } else if (resultadosBusqueda.size() == 1) {
@@ -922,10 +922,22 @@ public class PdfProcessorBean implements Serializable {
                 dibFiles.add(dibFile);
             }
 
+            // ── Orden estricto del lote ─────────────────────────────────
+            // 1) Patentes de Invención
+            // 2) Patentes de Invención PCT
+            // 3) Modelos de Utilidad
+            // 4) Diseños Industriales
+            // Se reordenan las tres listas paralelas (datos, reiv, dib) de
+            // forma estable, conservando el orden relativo dentro de cada grupo.
+            ordenarLotePorTipo(dataList, reivFiles, dibFiles);
+
+            // ── Portadas de sección (PDFs en /WEB-INF/pdfs) ──
+            PdfProcessingService.SectionCovers covers = cargarPortadasSeccion(fc, tempDir);
+
             // Generar PDF por lote continuo (auto-detecta reiv/dib por patente)
             File resultado;
             String downloadName;
-            resultado = service.processPatentBatchFromDB(dataList, reivFiles, dibFiles, tempDir);
+            resultado = service.processPatentBatchFromDB(dataList, reivFiles, dibFiles, covers, tempDir);
             downloadName = "LOTE_PATENTES_" + lotePat.size() + ".pdf";
 
             enviarPdfAlNavegador(fc, resultado, downloadName);
@@ -939,6 +951,100 @@ public class PdfProcessorBean implements Serializable {
                 limpiarDirectorio(tempDir);
             }
         }
+    }
+
+    /**
+     * Reordena de forma estable las tres listas paralelas del lote
+     * (datos, reivindicaciones, dibujos) para que el PDF salga en orden
+     * estricto por tipo de patente:
+     *   1) Patentes de Invención (PI)
+     *   2) Patentes de Invención PCT (PC)
+     *   3) Modelos de Utilidad (MU)
+     *   4) Diseños Industriales (DI)
+     * Dentro de cada grupo se conserva el orden original del lote.
+     */
+    private void ordenarLotePorTipo(List<PatentData> dataList,
+                                    List<File> reivFiles, List<File> dibFiles) {
+        int n = dataList.size();
+        List<Integer> indices = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            indices.add(i);
+        }
+        // Collections.sort es estable: respeta el orden relativo en empates.
+        indices.sort((a, b) -> Integer.compare(
+                ordenTipoPatente(dataList.get(a)),
+                ordenTipoPatente(dataList.get(b))));
+
+        List<PatentData> dataOrden = new ArrayList<>(n);
+        List<File> reivOrden = new ArrayList<>(n);
+        List<File> dibOrden = new ArrayList<>(n);
+        for (int idx : indices) {
+            dataOrden.add(dataList.get(idx));
+            reivOrden.add(reivFiles.get(idx));
+            dibOrden.add(dibFiles.get(idx));
+        }
+
+        dataList.clear(); dataList.addAll(dataOrden);
+        reivFiles.clear(); reivFiles.addAll(reivOrden);
+        dibFiles.clear(); dibFiles.addAll(dibOrden);
+    }
+
+    /**
+     * Copia las portadas de sección desde /WEB-INF/pdfs a la carpeta temporal
+     * y las devuelve listas para insertarse al inicio de cada grupo del lote.
+     * Si algún archivo no existe, ese campo queda null (sin portada).
+     */
+    private PdfProcessingService.SectionCovers cargarPortadasSeccion(
+            FacesContext fc, File tempDir) {
+        PdfProcessingService.SectionCovers covers = new PdfProcessingService.SectionCovers();
+        covers.invencion = copiarRecursoWeb(fc,
+                "/WEB-INF/pdfs/patentes_invencion.pdf", tempDir, "portada_invencion.pdf");
+        covers.modelos = copiarRecursoWeb(fc,
+                "/WEB-INF/pdfs/patentes_modelos.pdf", tempDir, "portada_modelos.pdf");
+        covers.disenios = copiarRecursoWeb(fc,
+                "/WEB-INF/pdfs/patentes_disenios.pdf", tempDir, "portada_disenios.pdf");
+        return covers;
+    }
+
+    /**
+     * Copia un recurso del WAR (resuelto vía ServletContext) a un archivo
+     * temporal. Devuelve null si el recurso no existe o no se puede leer.
+     */
+    private File copiarRecursoWeb(FacesContext fc, String resourcePath,
+                                  File destDir, String nombreDestino) {
+        try (InputStream is = fc.getExternalContext().getResourceAsStream(resourcePath)) {
+            if (is == null) {
+                LOG.warning("Recurso no encontrado: " + resourcePath);
+                return null;
+            }
+            File out = new File(destDir, nombreDestino);
+            IOUtils.copyStream(is, out);
+            return out;
+        } catch (Exception e) {
+            LOG.warning("No se pudo cargar recurso " + resourcePath + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Rango de orden por tipo de patente:
+     *   0 = Patentes de Invención (PI)
+     *   1 = Patentes de Invención PCT (PC)
+     *   2 = Modelos de Utilidad (MU)
+     *   3 = Diseños Industriales (DI)
+     * Cualquier otro tipo va al inicio.
+     */
+    private int ordenTipoPatente(PatentData pd) {
+        if (pd.isDisenoIndustrial()) {
+            return 3;
+        }
+        if (pd.isModeloUtilidad()) {
+            return 2;
+        }
+        if (pd.isPatentePCT()) {
+            return 1;
+        }
+        return 0; // PI y desconocidos
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -1448,6 +1554,7 @@ public class PdfProcessorBean implements Serializable {
         ec.setResponseContentLength((int) pdfFile.length());
         ec.setResponseHeader("Content-Disposition",
                 "attachment; filename=\"" + downloadName + "\"");
+        setPrimefacesDownloadCookie(ec);
 
         try (InputStream in = Files.newInputStream(pdfFile.toPath()); OutputStream out = ec.getResponseOutputStream()) {
             byte[] buf = new byte[8192];
@@ -1468,12 +1575,24 @@ public class PdfProcessorBean implements Serializable {
         ec.setResponseContentLength(data.length);
         ec.setResponseHeader("Content-Disposition",
                 "attachment; filename=\"" + downloadName + "\"");
+        setPrimefacesDownloadCookie(ec);
 
         try (OutputStream out = ec.getResponseOutputStream()) {
             out.write(data);
             out.flush();
         }
         fc.responseComplete();
+    }
+
+    /**
+     * Cookie usada por el front (showDownloadStatus / polling) para detectar que
+     * la descarga terminó. Debe ser legible por JS, por eso httpOnly=false.
+     */
+    private void setPrimefacesDownloadCookie(ExternalContext ec) {
+        java.util.Map<String, Object> props = new java.util.HashMap<>();
+        props.put("path", "/");
+        props.put("httpOnly", Boolean.FALSE);
+        ec.addResponseCookie("primefaces.download", "true", props);
     }
 
     private void limpiarDirectorio(File dir) {
